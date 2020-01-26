@@ -21,9 +21,16 @@ data TFState = TFState {
 str2sdoc = docToSDoc . Pretty.text
 
 instance Outputable TFState where
-  ppr (TFState ctx sig) = ((foldr ((O.<>) . (O.<> (str2sdoc "\n")) . ppr) O.empty ctx)) O.<> (str2sdoc "\n**\n") O.<> (ppr sig)
+  ppr (TFState ctx sig) = ((foldr ((O.<>) . (O.<> O.blankLine) . ppr) O.empty ctx)) O.<> (str2sdoc "\n**\n") O.<> (ppr sig)
   
   pprPrec r (TFState ctx sig) = ((foldr ((O.<>) . (O.<> (str2sdoc "\n")) . pprPrec r) O.empty ctx)) O.<> (str2sdoc "\n**\n") O.<> (pprPrec r sig)
   
-type FunCtx = ([TyVar], [EvVar])
-type Fun = ([FunCtx], (Id, MatchGroup GhcTc (LHsExpr GhcTc)))
+type Fun = ([Constraint], Id)
+data BiTree a = BT {
+    node :: a,
+    child :: [[BiTree a]]
+  }
+
+instance Outputable a => Outputable (BiTree a) where
+  ppr (BT n ch) = ppr n O.<> O.blankLine O.<> ppr ch
+  pprPrec r (BT n ch) = pprPrec r n O.<> O.blankLine O.<> pprPrec r ch

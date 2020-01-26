@@ -5,7 +5,6 @@ data B = B
 
 class Foo a where
 class Bar a where
-class Baz a where
 
 instance Bar B where
 
