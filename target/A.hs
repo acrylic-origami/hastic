@@ -11,5 +11,5 @@ instance Bar B where
 
 instance Bar a => Foo (A a) where
 
-foo :: (Baz b, Foo (a b)) => b -> a () -> ()
+foo :: (Bar b, Foo (a b)) => b -> a () -> ()
 foo _ _ = ()

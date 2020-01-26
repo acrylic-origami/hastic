@@ -76,53 +76,28 @@ backsub _ _ = Nothing
 -- max_concrete a b = if n_concrete a > n_concrete b then a else b where
 --   n_concrete = everything (+) (0 `mkQ` ())
 
-inst_subty :: Type -> Type -> Maybe (Map Id Type)
-inst_subty a b =
-  let ((fun_tys_a, a'), (fun_tys_b, b')) = both (splitFunTysLossy . everywhere (mkT dropForAlls)) (a, b)
-      ((m_app_con_a, m_app_tys_a), (m_app_con_b, m_app_tys_b)) = both (\ty ->
-          let (m_con, m_tys) = (fmap fst &&& fmap snd) $ splitAppTy_maybe ty
-              m_con_tys' = splitAppTys <$> m_con
-          in (fst <$> m_con_tys', liftA2 ((.pure) . (<>) . snd) m_con_tys' m_tys)
-        ) (a', b') -- NOTE also splits funtys annoyingly
-      
-      masum :: [(Type, Type)] -> Maybe (Map Id Type)
-      masum = foldrM (flip (fmap . M.union) . uncurry inst_subty) mempty
-  in snd ((a, b, a', b', m_app_con_a, m_app_tys_a, m_app_con_b, m_app_tys_b, fun_tys_a, fun_tys_b),
-      if | Just bvar <- getTyVar_maybe b -> Just (M.singleton bvar a) -- beta-reduction
-         | not $ null fun_tys_a -> -- function type matching
-          if length fun_tys_b < length fun_tys_a
-            then Nothing -- candidate function doesn't necessarily return function (unless it's `forall`; TODO)
-            else
-              M.union <$> inst_subty a' (mkFunTys (drop (length fun_tys_a) fun_tys_b) b') -- allow the possibility that the last term of `a` captures a return function from `b`: i.e. `a :: c` matches `b :: d -> e`
-              <*> masum (zip fun_tys_a fun_tys_b)
-         | Just (tycon_a, tyargs_a) <- splitTyConApp_maybe a -- `a` is a true TyCon
-         -> case (m_app_con_b >>= splitTyConApp_maybe) <|> splitTyConApp_maybe b of
-          Just (tycon_b, tyargs_b) -- NOTE impossible by no FlexibleInstances
-            | tycon_a == tycon_b -> masum $ zip tyargs_a tyargs_b
-            | otherwise -> Nothing
-          Nothing
-            | Just app_con_b <- m_app_con_b
-            , Just app_tys_b <- m_app_tys_b
-            -> if length tyargs_a >= length app_tys_b
-              then
-                let (tyargs_a_l, tyargs_a_r) = splitAt (length tyargs_a - length app_tys_b) tyargs_a
-                in masum ((mkTyConApp tycon_a tyargs_a_l, app_con_b) : zip tyargs_a_r app_tys_b)
-              else Nothing -- kindedness fail
-              
-            | otherwise -> Nothing -- b isn't tycon, appcon or var... fail or panic?
-         | otherwise -> -- `a` is probably a generic AppTy (e.g. `m a`)
-            do
-              a_args <- m_app_tys_a
-              b_args <- m_app_tys_b -- b could be TyConApp in general (although not here by no FlexibleInstances); assume TyConApp is also split by splitAppTys
-              let min_kinds =  min (length a_args) (length b_args)
-                  (a_args_l, a_args_r) = splitAt (length a_args - min_kinds) a_args
-                  (b_args_l, b_args_r) = splitAt (length b_args -min_kinds) b_args
-              -- must trim args from the right to match
-              conmap <- join $ liftA2 (curry $ uncurry inst_subty . both (uncurry mkAppTys) . ((,a_args_l) *** (,b_args_l))) m_app_con_a m_app_con_b
-              argmap <- masum $ zip a_args_r b_args_r
-              return $ M.union conmap argmap
-    )
-
+unify :: Type -> Type -> Maybe (Map Id Type, Map Id Type)
+unify x y = liftA2 (,) (unify' y x) (unify' x y) where -- sorry for flipped args, felt like it made sense to make the first arg the concrete one first
+  unify' a b = -- only bind `b` to more specific aspects of `a`
+    let ((app_con_a, app_args_a), (app_con_b, app_args_b)) = both splitAppTys (a, b) -- NOTE also splits funtys annoyingly
+        masum :: [(Type, Type)] -> Maybe (Map Id Type)
+        masum = foldrM (flip (fmap . M.union) . uncurry unify') mempty
+    in if | null app_args_b -> flip M.singleton a <$> getTyVar_maybe b -- `b` is totally free (or something else unexpected)
+          | Just (tycon_a, tyargs_a) <- splitTyConApp_maybe a -- `a` is a true TyCon
+          -> case splitTyConApp_maybe app_con_b of
+            Just (tycon_b, tyargs_b) -- `b` is also a true TyCon
+              | tycon_a == tycon_b -> masum $ zip tyargs_a tyargs_b
+              | otherwise -> Nothing
+            Nothing
+              | length tyargs_a >= length app_args_b
+              -> let (tyargs_a_l, tyargs_a_r) = splitAt (length tyargs_a - length app_args_b) tyargs_a
+                 in masum ((mkTyConApp tycon_a tyargs_a_l, app_con_b) : zip tyargs_a_r app_args_b)
+              | otherwise -> Nothing -- kindedness fail
+          | not (null app_args_a)
+          -> let ((args_al, args_ar), (args_bl, args_br)) = rmatch app_args_a app_args_b
+             in foldr (liftA2 (<>) . uncurry unify') (Just mempty) (zip (mkAppTys app_con_a args_al : args_ar) (mkAppTys app_con_b args_bl : args_br))
+          | otherwise -> Just mempty
+          
 main = do
   mod_str:args' <- getArgs
   runGhc (Just libdir) $ do
@@ -216,7 +191,7 @@ main = do
                           m_sig_subst = flip (TCvSubst emptyInScopeSet) emptyCvSubstEnv
                             . flip unitUFM (mkTyConApp tycon inst_argsl)
                             <$> m_cn_tyvar -- sub protected by arity: still free in fun side
-                          m_inst_subst_map = foldr (liftA2 (<>) . uncurry inst_subty) (Just mempty) (zip cn_argsr inst_argsr)
+                          m_inst_subst_map = fmap snd $ foldr (liftA2 (<>) . uncurry unify) (Just mempty) (zip cn_argsr inst_argsr)
                       in case m_inst_subst_map of
                         Just inst_subst_map ->
                           let inst_subst = TCvSubst emptyInScopeSet (listToUFM $ M.toList $ inst_subst_map) emptyCvSubstEnv
