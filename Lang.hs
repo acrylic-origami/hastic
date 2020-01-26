@@ -2,7 +2,6 @@ module Lang where
 
 import Class
 import Type
-import Deque.Lazy ( Deque(..), uncons )
 import Var
 import Data.Map.Strict ( Map(..) )
 import GHC
@@ -15,7 +14,7 @@ type Inst = ([Constraint], [Type]) -- constraints => C ty1 ty2 ...
 type InstMap = Map TyCon [Inst]
 type ClassInstMap = Map Class InstMap
 data TFState = TFState {
-    ctx :: Deque Constraint,
+    ctx :: [Constraint],
     sig :: Type
   }
 

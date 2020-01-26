@@ -1,10 +1,15 @@
 module A where
 
-data A = A
+data A a = A a
+data B = B
 
 class Foo a where
-   
-instance Foo A where
-  
-foo :: Foo a => a -> ()
-foo _ = ()
+class Bar a where
+class Baz a where
+
+instance Bar B where
+
+instance Bar a => Foo (A a) where
+
+foo :: (Baz b, Foo (a b)) => b -> a () -> ()
+foo _ _ = ()

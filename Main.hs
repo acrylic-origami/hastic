@@ -15,7 +15,7 @@ import Class ( Class(..) )
 import ConLike ( ConLike(..) )
 import Coercion ( emptyCvSubstEnv )
 import VarEnv ( emptyInScopeSet )
-import UniqFM ( UniqFM(..), listToUFM )
+import UniqFM ( UniqFM(..), listToUFM, unitUFM )
 
 import Data.Bitraversable
 import Data.Foldable ( foldrM )
@@ -24,6 +24,7 @@ import Control.Monad ( join )
 import Data.Maybe
 import Data.Generics hiding ( TyCon, empty )
 import Data.Generics.Extra ( everything_ppr, GenericQT(..), gmapQT, mkQT )
+import Data.List ( uncons )
 import System.Environment ( getArgs )
 import Control.Monad.IO.Class ( liftIO )
 import Control.Applicative ( Applicative(..), Alternative(..), (<|>) )
@@ -33,7 +34,6 @@ import Data.IntMap ( IntMap(..) )
 import qualified Data.IntMap as IM
 import Data.Map.Strict ( Map(..) )
 import qualified Data.Map.Strict as M
-import Deque.Lazy ( Deque(..), snoc, uncons ) -- queue operation
 
 import Ra.Lang.Extra ( ppr_unsafe )
 import Ra.GHC.Util ( varString, splitFunTysLossy )
@@ -69,6 +69,8 @@ backsub l r | let (lcon, larg) = splitAppTys l
             , length larg <= length rarg
             = Just ((lcon, mkAppTys rcon rargl):(zip larg rargr))
 backsub _ _ = Nothing
+
+
 
 -- max_concrete :: Type -> Type -> Type
 -- max_concrete a b = if n_concrete a > n_concrete b then a else b where
@@ -206,75 +208,40 @@ main = do
           | Just (cn@(cn_cls, (cn_ty, cn_args)), ctx_rest) <- uncons ctx
           = let cn_tyhead = dropForAlls $ fromMaybe cn_ty $ fmap fst $ splitAppTy_maybe cn_ty -- TODO can we have foralls in constraints? if so, what do they do?
                 -- sub_ty is the instance head 
-                
-                and_sum :: (Foldable f, Applicative t, Monoid m) => f (t m) -> t m
-                and_sum = foldr (liftA2 (<>)) (pure mempty)
-                
-                tf_vars :: TyCon -> Inst -> GenericQT (Maybe [Constraint])
-                tf_vars sub_tycon sub_inst@(sub_ctx, sub_args) = (first and_sum . gmapQT (tf_vars sub_tycon sub_inst))
-                  `mkQT` (\ty ->
-                      let (tyhead, tyargs) = splitAppTys ty
-                          (sub_argsl, sub_argsr) = splitAt (tyConArity sub_tycon - length tyargs) sub_args
-                          (tyargsl, tyargsr) = splitAt (tyConArity sub_tycon - length sub_args) tyargs -- assert ((tyConArity sub_tycon - length sub_args - length tyargs) <= 0)
-                          m_subst =
-                            flip (TCvSubst emptyInScopeSet) emptyCvSubstEnv
-                            . listToUFM
-                            . M.toList
-                            <$> (and_sum $ map (uncurry inst_subty) (zip sub_argsr tyargsl)) -- if any fail inst_subty, this has to be Nothing, also default Just, hence not mconcat
-                          
-                      in if tyhead `eqType` cn_tyhead
-                        then case m_subst of
-                          Just subst ->
-                            let subbed_args = substTys subst (sub_argsl ++ sub_argsr)
-                                subbed_ctx = map (second (substTy subst *** substTys subst)) sub_ctx
-                            in (Just subbed_ctx, mkTyConApp sub_tycon (subbed_args ++ tyargsr))
-                          Nothing -> (Nothing, ty)
-                        else first and_sum $ (gmapQT (tf_vars sub_tycon sub_inst) ty)
-                    )
-                
-                iter :: TyCon -> Inst -> Maybe [Type]
-                iter tycon inst =
-                  let (m_cons_ctx, ctx_rest') = foldr (uncurry (***) . (liftA2 (<>) *** snoc) . tf_vars tycon inst) (Just mempty, mempty) ctx_rest -- odd starting condition yes, but that's the default for the conjunction: T
-                      (m_cons_sig, sig') = tf_vars tycon inst sig
-                  in do
-                    next_ctx <- liftA2 (<>) m_cons_ctx m_cons_sig
-                    tyfind $ st {
-                        ctx = foldr snoc ctx_rest' next_ctx,
-                        sig = sig'
-                      }
-                
-            in case getTyVar_maybe cn_tyhead of
+                iter :: Maybe TyVar -> TyCon -> Inst -> Maybe [Type]
+                iter m_cn_tyvar tycon (cns', inst_args) =
+                  if length inst_args >= length cn_args
+                    then
+                      let ((inst_argsl, inst_argsr), (cn_argsl, cn_argsr)) = rmatch inst_args cn_args
+                          m_sig_subst = flip (TCvSubst emptyInScopeSet) emptyCvSubstEnv
+                            . flip unitUFM (mkTyConApp tycon inst_argsl)
+                            <$> m_cn_tyvar -- sub protected by arity: still free in fun side
+                          m_inst_subst_map = foldr (liftA2 (<>) . uncurry inst_subty) (Just mempty) (zip cn_argsr inst_argsr)
+                      in case m_inst_subst_map of
+                        Just inst_subst_map ->
+                          let inst_subst = TCvSubst emptyInScopeSet (listToUFM $ M.toList $ inst_subst_map) emptyCvSubstEnv
+                              subbed_ctx_rest' = map (second (substTy inst_subst *** substTys inst_subst)) ctx_rest
+                              subbed_inst_ctx = map (second (substTy inst_subst *** substTys inst_subst)) cns'
+                          in tyfind $ TFState {
+                            ctx = subbed_ctx_rest' <> subbed_inst_ctx,
+                            sig = fromMaybe sig $ flip substTy sig <$> m_sig_subst
+                          }
+                    else Nothing
+          in case getTyVar_maybe cn_tyhead of
               
-              -- new tyvar, need to find instances
-              Just _cn_tyvar -> join $ fmap (mconcat . map (uncurry iter) . concatMap (uncurry (map . (,))) . M.toList) $ M.lookup cn_cls inst_map
-                -- note the mconcat: this is the disjunction
-                
-              -- [old] tycon, need to verify instances
-              Nothing -> case tyConAppTyCon_maybe cn_tyhead of
-                Just cn_tycon
-                  | Just (Just insts) <- M.lookup cn_tycon <$> M.lookup cn_cls inst_map
-                  -> mconcat $ map (iter cn_tycon) insts
-                Nothing -> Nothing -- or panic?
-                
+            -- new tyvar, need to find instances
+            Just cn_tyvar -> join $ fmap (mconcat . concatMap (uncurry (map . (uncurry (iter (Just cn_tyvar)) .) . (,))) . M.toList) $ M.lookup cn_cls inst_map
+              -- note the mconcat: this is the disjunction
+              
+            -- [old] tycon, need to verify instances
+            Nothing -> case tyConAppTyCon_maybe cn_tyhead of
+              Just cn_tycon
+                | Just (Just insts) <- M.lookup cn_tycon <$> M.lookup cn_cls inst_map
+                -> mconcat $ map (iter Nothing cn_tycon) insts
+              Nothing -> Nothing -- or panic?
+              
           | otherwise = Just [sig] -- BASE CASE: no more constraints: this passed
-            
-            -- tyfind $ case M.lookup cn_var objs of
-            -- Just obj ->
-            --   let m_new_ctx :: [Maybe [Constraint]]
-            --       m_new_ctx = M.lookup obj inst_map >>= (asum . map (chk cn))  -- for each 
-            --   in st {
-            --     ctx = foldr snoc ctx (concat $ catMaybes m_new_ctx),
-            --     objs = M.adjust (catMaybes . map (uncurry ($>)) . zip m_new_ctx) cn_var objs -- Constraint -> [TyCon] -> [TyCon]
-            --   }
-            -- Nothing ->
-            --   let m_new_ctx :: [(TyCon, Maybe [Constraint])]
-            --       m_new_ctx = map (second (asum . map (chk cn))) $ M.toList inst_map
-            --       next_insts = catMaybes $ map (uncurry (<$)) m_new_ctx
-            --   in st {
-            --     ctx = foldr snoc ctx (concat $ catMaybes $ map snd m_new_ctx),
-            --     objs = M.insert cn_var next_insts objs
-            --   }
     
     -- pure ()
     -- liftIO $ putStrLn $ unlines $ map (uncurry (shim " : ") . (show . U.getKey . getUnique &&& ppr_unsafe) . fst . head . (\(_,_,x) -> x)) inst_map
-    liftIO $ putStrLn $ ppr_unsafe $ tyfind (TFState (foldr snoc mempty $ ev_to_ctx $ snd $ head $ fst $ head funs) (varType $ fst $ snd $ head funs))
+    liftIO $ putStrLn $ ppr_unsafe $ tyfind (TFState (ev_to_ctx $ snd $ head $ fst $ head funs) (varType $ fst $ snd $ head funs))
