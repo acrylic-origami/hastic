@@ -234,7 +234,7 @@ main = do
                 
                 iter :: TyCon -> Inst -> Maybe [Type]
                 iter tycon inst =
-                  let (m_cons_ctx, ctx_rest') = foldr (uncurry (***) . ((<>) *** snoc) . tf_vars tycon inst) mempty ctx_rest
+                  let (m_cons_ctx, ctx_rest') = foldr (uncurry (***) . (liftA2 (<>) *** snoc) . tf_vars tycon inst) (Just mempty, mempty) ctx_rest -- odd starting condition yes, but that's the default for the conjunction: T
                       (m_cons_sig, sig') = tf_vars tycon inst sig
                   in do
                     next_ctx <- liftA2 (<>) m_cons_ctx m_cons_sig
