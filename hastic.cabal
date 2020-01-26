@@ -18,7 +18,7 @@ extra-source-files:  CHANGELOG.md
 
 executable hastic
   main-is:             Main.hs
-  -- other-modules:
+  other-modules:       Lang, Util
   -- other-extensions:
   build-depends:       base >=4.12 && <4.13, ghc, ghc-paths, syb, syb-extra, rahse, containers, deque
   -- hs-source-dirs:

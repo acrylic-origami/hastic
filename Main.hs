@@ -18,10 +18,12 @@ import VarEnv ( emptyInScopeSet )
 import UniqFM ( UniqFM(..), listToUFM )
 
 import Data.Bitraversable
+import Data.Foldable ( foldrM )
 import Control.Arrow ( (&&&), (***), first, second )
+import Control.Monad ( join )
 import Data.Maybe
 import Data.Generics hiding ( TyCon, empty )
-import Data.Generics.Extra ( everything_ppr, gmapQT, mkQT )
+import Data.Generics.Extra ( everything_ppr, GenericQT(..), gmapQT, mkQT )
 import System.Environment ( getArgs )
 import Control.Monad.IO.Class ( liftIO )
 import Control.Applicative ( Applicative(..), Alternative(..), (<|>) )
@@ -34,7 +36,10 @@ import qualified Data.Map.Strict as M
 import Deque.Lazy ( Deque(..), snoc, uncons ) -- queue operation
 
 import Ra.Lang.Extra ( ppr_unsafe )
-import Ra.GHC.Util ( varString )
+import Ra.GHC.Util ( varString, splitFunTysLossy )
+
+import Util
+import Lang
 
 module_tcs :: GhcMonad m => ModSummary -> m TypecheckedModule
 module_tcs = (typecheckModule=<<) . parseModule
@@ -51,17 +56,6 @@ constr_var_ppr = everything_ppr (
 -- type Inst = ([TyVar], [EvVar], [(Class, [Type])])
 -- data TyHead = THTyCon TyCon | THTyVar TyVar
 
-type Constraint = (Class, (Type, [Type])) -- class name, head, args. Head may be an AppTy or plain with head TyCon or TyVar
-type Inst = ([Constraint], [Type]) -- constraints => C ty1 ty2 ...
-type InstMap = Map TyCon [Inst]
-type ClassInstMap = Map Class InstMap
-data TFState = TFState {
-    ctx :: Deque Constraint,
-    sig :: Type
-  }
-type FunCtx = ([TyVar], [EvVar])
-type Fun = ([FunCtx], (Id, MatchGroup GhcTc (LHsExpr GhcTc)))
-
 instance Ord TyCon where
   a <= b = (U.getKey $ getUnique $ a) <= (U.getKey $ getUnique $ a)
   
@@ -71,14 +65,14 @@ instance Ord Class where
 backsub :: Type -> Type -> Maybe [(Type, Type)] -- require right type to be more specific than left (possibly higher kindedness)
 backsub l r | let (lcon, larg) = splitAppTys l
                   (rcon, rarg) = splitAppTys r
-                  (rargl, rargr) = splitAt (length rarg - length larg)
+                  (rargl, rargr) = splitAt (length rarg - length larg) rarg
             , length larg <= length rarg
             = Just ((lcon, mkAppTys rcon rargl):(zip larg rargr))
 backsub _ _ = Nothing
 
-max_concrete :: Type -> Type -> Type
-max_concrete a b = if n_concrete a > n_concrete b then a else b where
-  n_concrete = everything (+) (0 `mkQ` ())
+-- max_concrete :: Type -> Type -> Type
+-- max_concrete a b = if n_concrete a > n_concrete b then a else b where
+--   n_concrete = everything (+) (0 `mkQ` ())
 
 inst_subty :: Type -> Type -> Maybe (Map Id Type)
 inst_subty a b =
@@ -90,17 +84,17 @@ inst_subty a b =
         ) (a', b') -- NOTE also splits funtys annoyingly
       
       masum :: [(Type, Type)] -> Maybe (Map Id Type)
-      masum = foldrM (flip (fmap . union) . uncurry inst_subty) mempty
+      masum = foldrM (flip (fmap . M.union) . uncurry inst_subty) mempty
   in snd ((a, b, a', b', m_app_con_a, m_app_tys_a, m_app_con_b, m_app_tys_b, fun_tys_a, fun_tys_b),
-      if | Just bvar <- getTyVar_maybe b -> Just (singleton bvar a) -- beta-reduction
+      if | Just bvar <- getTyVar_maybe b -> Just (M.singleton bvar a) -- beta-reduction
          | not $ null fun_tys_a -> -- function type matching
           if length fun_tys_b < length fun_tys_a
             then Nothing -- candidate function doesn't necessarily return function (unless it's `forall`; TODO)
             else
-              union <$> inst_subty a' (mkFunTys (drop (length fun_tys_a) fun_tys_b) b') -- allow the possibility that the last term of `a` captures a return function from `b`: i.e. `a :: c` matches `b :: d -> e`
+              M.union <$> inst_subty a' (mkFunTys (drop (length fun_tys_a) fun_tys_b) b') -- allow the possibility that the last term of `a` captures a return function from `b`: i.e. `a :: c` matches `b :: d -> e`
               <*> masum (zip fun_tys_a fun_tys_b)
          | Just (tycon_a, tyargs_a) <- splitTyConApp_maybe a -- `a` is a true TyCon
-         -> case (m_app_con_b >>= splitTyConApp_maybe) <|>splitTyConApp_maybe b of
+         -> case (m_app_con_b >>= splitTyConApp_maybe) <|> splitTyConApp_maybe b of
           Just (tycon_b, tyargs_b) -- NOTE impossible by no FlexibleInstances
             | tycon_a == tycon_b -> masum $ zip tyargs_a tyargs_b
             | otherwise -> Nothing
@@ -110,7 +104,7 @@ inst_subty a b =
             -> if length tyargs_a >= length app_tys_b
               then
                 let (tyargs_a_l, tyargs_a_r) = splitAt (length tyargs_a - length app_tys_b) tyargs_a
-                in masum ((mkTyConAppTys tycon_a tyargs_a_l, app_con_b) : zip tyargs_a_r app_tys_b)
+                in masum ((mkTyConApp tycon_a tyargs_a_l, app_con_b) : zip tyargs_a_r app_tys_b)
               else Nothing -- kindedness fail
               
             | otherwise -> Nothing -- b isn't tycon, appcon or var... fail or panic?
@@ -121,11 +115,10 @@ inst_subty a b =
               let min_kinds =  min (length a_args) (length b_args)
                   (a_args_l, a_args_r) = splitAt (length a_args - min_kinds) a_args
                   (b_args_l, b_args_r) = splitAt (length b_args -min_kinds) b_args
-              args <- zip a_args_r b_args_r
               -- must trim args from the right to match
               conmap <- join $ liftA2 (curry $ uncurry inst_subty . both (uncurry mkAppTys) . ((,a_args_l) *** (,b_args_l))) m_app_con_a m_app_con_b
-              argmap <- masum args
-              return $ union conmap argmap
+              argmap <- masum $ zip a_args_r b_args_r
+              return $ M.union conmap argmap
     )
 
 main = do
@@ -167,9 +160,11 @@ main = do
                         . abe_mono
                       ) abs_exports
                     abs_ctx = ev_to_ctx abs_ev_vars
+                    cls_map = M.fromListWith (<>) $ map (second (pure . second (pure . (abs_ctx,)))) tyclss
+                    cls_inst_map = M.map (M.fromListWith (<>)) cls_map
               , not $ null tyclss
               -> (
-                  M.fromListWith (<>) $ map (second (pure . second (abs_ctx,))) tyclss -- (\(cls, (tycon, args)) -> ((cls, tycon), [(abs_ev_vars, args)]) )
+                   cls_inst_map -- (\(cls, (tycon, args)) -> ((cls, tycon), [(abs_ev_vars, args)]) )
                   , False
                 )
               -- , any (isJust . () . tyConAppTyCon_maybe . dropForAlls . varType . abe_mono) abs_exports 
@@ -177,7 +172,8 @@ main = do
             _ -> (mempty, True)
           ) :: HsBind GhcTc -> (ClassInstMap, Bool))) tl_binds
         
-        ev_to_ctx = undefined
+        ev_to_ctx :: [EvVar] -> [Constraint]
+        ev_to_ctx = catMaybes . map (join . fmap (uncurry (liftA2 (,)) . (tyConClass_maybe *** fmap splitAppTys . one)) . splitTyConApp_maybe . varType)
         
         -- inst_arity = everythingBut (M.unionWith (<>)) (f0 `mkQ` ((\case
         --     VarBind {  }
@@ -208,51 +204,49 @@ main = do
         tyfind :: TFState -> Maybe [Type]
         tyfind st@(TFState { ctx, sig })
           | Just (cn@(cn_cls, (cn_ty, cn_args)), ctx_rest) <- uncons ctx
-          = let cn_tyhead = dropForAlls $ fromMaybe cn_ty $ fmap fst $ splitTyApp_maybe cn_ty -- TODO can we have foralls in constraints? if so, what do they do?
+          = let cn_tyhead = dropForAlls $ fromMaybe cn_ty $ fmap fst $ splitAppTy_maybe cn_ty -- TODO can we have foralls in constraints? if so, what do they do?
                 -- sub_ty is the instance head 
                 
                 and_sum :: (Foldable f, Applicative t, Monoid m) => f (t m) -> t m
-                and_sum = foldr (liftA2 (<>)) (Just mempty)
+                and_sum = foldr (liftA2 (<>)) (pure mempty)
                 
-                tf_vars :: (TyCon, Inst) -> GenericQT (Maybe [Constraint])
-                tf_vars (sub_tycon, (sub_ctx, sub_args)) = first (and_sum) . (
-                    gmapQT go
-                    `mkQT` (\ty ->
-                        let (tyhead, tyargs) = splitAppTys ty
-                            (sub_argsl, sub_argsr) = splitAt (tyConArity sub_tycon - length tyargs)
-                            (tyargsl, tyargsr) = splitAt (tyConArity sub_tycon - length sub_args) -- assert ((tyConArity sub_tycon - length sub_args - length tyargs) <= 0)
-                            m_subst =
-                              flip (TCvSubst emptyInScopeSet) emptyCvSubstEnv
-                              . listToUFM
-                              . M.toList
-                              <$> (and_sum $ map (uncurry inst_subty) (zip sub_argsr tyargsl)) -- if any fail inst_subty, this has to be Nothing, also default Just, hence not mconcat
-                            
-                        in if tyhead `eqType` cn_tyhead
-                          then case m_subst of
-                            Just subst ->
-                              let subbed_args = substTys mapper (sub_argsl ++ sub_argsr)
-                                  subbed_ctx = substTys mapper sub_ctx
-                              in (Just subbed_ctx, mkTyConTy sub_tycon (subbed_args ++ tyargsr))
-                            Nothing -> (Nothing, ty)
-                          else gmapQT tf_vars ty
-                      )
-                  )
+                tf_vars :: TyCon -> Inst -> GenericQT (Maybe [Constraint])
+                tf_vars sub_tycon sub_inst@(sub_ctx, sub_args) = (first and_sum . gmapQT (tf_vars sub_tycon sub_inst))
+                  `mkQT` (\ty ->
+                      let (tyhead, tyargs) = splitAppTys ty
+                          (sub_argsl, sub_argsr) = splitAt (tyConArity sub_tycon - length tyargs) sub_args
+                          (tyargsl, tyargsr) = splitAt (tyConArity sub_tycon - length sub_args) tyargs -- assert ((tyConArity sub_tycon - length sub_args - length tyargs) <= 0)
+                          m_subst =
+                            flip (TCvSubst emptyInScopeSet) emptyCvSubstEnv
+                            . listToUFM
+                            . M.toList
+                            <$> (and_sum $ map (uncurry inst_subty) (zip sub_argsr tyargsl)) -- if any fail inst_subty, this has to be Nothing, also default Just, hence not mconcat
+                          
+                      in if tyhead `eqType` cn_tyhead
+                        then case m_subst of
+                          Just subst ->
+                            let subbed_args = substTys subst (sub_argsl ++ sub_argsr)
+                                subbed_ctx = map (second (substTy subst *** substTys subst)) sub_ctx
+                            in (Just subbed_ctx, mkTyConApp sub_tycon (subbed_args ++ tyargsr))
+                          Nothing -> (Nothing, ty)
+                        else first and_sum $ (gmapQT (tf_vars sub_tycon sub_inst) ty)
+                    )
                 
                 iter :: TyCon -> Inst -> Maybe [Type]
                 iter tycon inst =
-                  let (m_cons_ctx, ctx_rest') = tf_vars inst ctx_rest
-                      (m_cons_sig, sig') = tf_vars inst sig
-                  in fmap (\next_ctx ->
-                      tyfind $ st {
+                  let (m_cons_ctx, ctx_rest') = foldr (uncurry (***) . ((<>) *** snoc) . tf_vars tycon inst) mempty ctx_rest
+                      (m_cons_sig, sig') = tf_vars tycon inst sig
+                  in do
+                    next_ctx <- liftA2 (<>) m_cons_ctx m_cons_sig
+                    tyfind $ st {
                         ctx = foldr snoc ctx_rest' next_ctx,
                         sig = sig'
                       }
-                    ) $ liftA2 (<>) m_cons_ctx m_cons_sig
                 
             in case getTyVar_maybe cn_tyhead of
               
               -- new tyvar, need to find instances
-              Just _cn_tyvar -> join $ fmap (mconcat . map iter . M.toList ) $ M.lookup cn_cls inst_map
+              Just _cn_tyvar -> join $ fmap (mconcat . map (uncurry iter) . concatMap (uncurry (map . (,))) . M.toList) $ M.lookup cn_cls inst_map
                 -- note the mconcat: this is the disjunction
                 
               -- [old] tycon, need to verify instances
@@ -281,5 +275,6 @@ main = do
             --     objs = M.insert cn_var next_insts objs
             --   }
     
-    pure ()
+    -- pure ()
     -- liftIO $ putStrLn $ unlines $ map (uncurry (shim " : ") . (show . U.getKey . getUnique &&& ppr_unsafe) . fst . head . (\(_,_,x) -> x)) inst_map
+    liftIO $ putStrLn $ ppr_unsafe $ tyfind (TFState (foldr snoc mempty $ ev_to_ctx $ snd $ head $ fst $ head funs) (varType $ fst $ snd $ head funs))

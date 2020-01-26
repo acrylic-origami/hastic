@@ -18,7 +18,7 @@ unassoc (a,(b,c)) = ((a,b),c)
 asum :: (Foldable t, Alternative f) => t (f a) -> f a
 asum = foldr (<|>) empty
 
-both f a b = (f a, f b)
+both f (a, b) = (f a, f b)
 
 rmatch :: [a] -> [b] -> (([a], [a]), ([b], [b]))
 rmatch a b =
