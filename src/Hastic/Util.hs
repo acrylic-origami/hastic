@@ -1,12 +1,16 @@
-module Util where
+module Hastic.Util where
 
 import Control.Applicative
+import Control.Monad.Trans.Maybe ( MaybeT(..) )
 
 -- a is candidate function _to_ substitute, b is function being substituted
 -- we want b to be more general than a: the return is a Map of tyvars in b back to things in a
 
 shim :: Monoid m => m -> m -> m -> m
 shim b a c = a <> b <> c
+
+liftM :: Monad m => Maybe a -> MaybeT m a
+liftM = MaybeT . return -- why doesn't this exist??
 
 one :: [a] -> Maybe a
 one [a] = Just a

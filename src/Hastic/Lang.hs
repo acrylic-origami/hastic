@@ -1,5 +1,8 @@
-module Lang where
+module Hastic.Lang where
 
+import GHC
+import Unique ( Uniquable(..), Unique(..), getUnique )
+import qualified Unique as U ( getKey )
 import Class
 import Type
 import Var
@@ -9,6 +12,15 @@ import Outputable ( Outputable(..), docToSDoc )
 import qualified Outputable as O
 import qualified Pretty
 
+-- type Inst = ([TyVar], [EvVar], [(Class, [Type])])
+-- data TyHead = THTyCon TyCon | THTyVar TyVar
+
+instance Ord TyCon where
+  a <= b = (U.getKey $ getUnique $ a) <= (U.getKey $ getUnique $ a)
+  
+instance Ord Class where
+  a <= b = (U.getKey $ getUnique $ a) <= (U.getKey $ getUnique $ a)
+  
 type Constraint = (Class, (Type, [Type])) -- class name, head, args. Head may be an AppTy or plain with head TyCon or TyVar
 type Inst = ([Constraint], [Type]) -- constraints => C ty1 ty2 ...
 type InstMap = Map TyCon [Inst]
