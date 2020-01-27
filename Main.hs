@@ -223,12 +223,12 @@ main = do
               
           | otherwise = Just [sig] -- BASE CASE: no more constraints: this passed
         
-        expand_fun :: Int -> Id -> Maybe (BiTree Id)
+        expand_fun :: Int -> Id -> Maybe AppTree
         expand_fun n _ | n <= 0 = Nothing
         expand_fun n f0 =
           let (f0_args, f0_ret) = splitFunTys (varType f0)
           
-              go :: [Type] -> Maybe [[BiTree Id]]
+              go :: [Type] -> Maybe [[AppTree]]
               go [] = Just mempty
               go (arg0:argrest) =
                 foldr (\a b ->
@@ -249,10 +249,16 @@ main = do
                     ) fn_tys
                 ) $ M.toList funs
           in BT f0 <$> go f0_args
+        
+        apptree_ast :: AppTree -> [LHsExpr GhcTc]
+        apptree_ast (BT n ch) = apptree_ast' (noLoc (HsVar NoExt (noLoc n))) ch where
+          apptree_ast' term (arg:rest) = concatMap (concatMap (flip apptree_ast' rest . noLoc . HsApp NoExt term) . apptree_ast) arg
+          apptree_ast' term [] = [term]
+          
     -- pure ()
     -- liftIO $ putStrLn $ unlines $ map (uncurry (shim " : ") . (show . U.getKey . getUnique &&& ppr_unsafe) . fst . head . (\(_,_,x) -> x)) inst_map
     -- liftIO $ putStrLn $ ppr_unsafe $ tyfind (TFState (ev_to_ctx $ snd $ head $ fst $ head funs) (varType $ fst $ snd $ head funs))
     liftIO $ do
-      putStrLn $ ppr_unsafe $ funs
-      putStrLn $ ppr_unsafe $ varType $ head $ head $ map (uncurry (map . (uncurry setVarType .) . (,))) $ M.toList $ funs
-      putStrLn $ ppr_unsafe $ expand_fun 10 (head $ head $ map (uncurry (map . (uncurry setVarType .) . (,))) $ M.toList $ funs)
+      -- putStrLn $ ppr_unsafe $ funs
+      -- putStrLn $ ppr_unsafe $ varType $ head $ head $ map (uncurry (map . (uncurry setVarType .) . (,))) $ M.toList $ funs
+      putStrLn $ ppr_unsafe $ fmap apptree_ast $ expand_fun 10 (head $ head $ map (uncurry (map . (uncurry setVarType .) . (,))) $ M.toList $ funs)

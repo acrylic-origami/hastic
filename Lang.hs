@@ -34,3 +34,5 @@ data BiTree a = BT {
 instance Outputable a => Outputable (BiTree a) where
   ppr (BT n ch) = ppr n O.<> O.blankLine O.<> ppr ch
   pprPrec r (BT n ch) = pprPrec r n O.<> O.blankLine O.<> pprPrec r ch
+
+type AppTree = BiTree Id
