@@ -33,6 +33,6 @@ install opts _ms tc_gbl = do
   binds <- liftIO $ atomicModifyIORef global_binds ((id &&& id) . (tcg_binds tc_gbl :))
   
   when (length binds == (length $ hsc_targets $ env_top env)) $ liftIO $ do
-    putStrLn $ ppr_unsafe $ analyze_all $ unionManyBags binds
+    (analyze $ unionManyBags binds) >>= putStrLn . ppr_unsafe
   
   return tc_gbl

@@ -64,4 +64,4 @@ main = do
       -- putStrLn $ ppr_unsafe $ map (concretize inst_map) (find_funs tl_binds)
       -- putStrLn $ ppr_unsafe $ varType $ head $ head $ map (uncurry (map . (uncurry setVarType .) . (,))) $ M.toList $ funs
       
-      putStrLn $ ppr_unsafe $ analyze_all tl_binds
+      analyze tl_binds >>= putStrLn . ppr_unsafe
