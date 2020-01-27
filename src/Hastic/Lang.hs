@@ -37,7 +37,7 @@ instance Outputable TFState where
   
   pprPrec r (TFState ctx sig) = ((foldr ((O.<>) . (O.<> (str2sdoc "\n")) . pprPrec r) O.empty ctx)) O.<> (str2sdoc "\n**\n") O.<> (pprPrec r sig)
   
-type Fun = ([Constraint], Id)
+type Fun = ([Constraint], Located Id)
 data BiTree a = BT {
     node :: a,
     child :: [[BiTree a]]
@@ -47,4 +47,4 @@ instance Outputable a => Outputable (BiTree a) where
   ppr (BT n ch) = ppr n O.<> O.blankLine O.<> ppr ch
   pprPrec r (BT n ch) = pprPrec r n O.<> O.blankLine O.<> pprPrec r ch
 
-type AppTree = BiTree Id
+type AppTree = BiTree (Located Id)

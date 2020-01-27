@@ -3,6 +3,7 @@ module Hastic (
   analyze_all,
   find_insts,
   find_funs,
+  concretize,
   unify,
   apptree_ast
 ) where
@@ -11,9 +12,12 @@ import GHC
 import Type
 import TyCon
 import Var
+import FastString ( fsLit )
 import Bag
 import TcEvidence
-import Unique ( Uniquable(..), Unique(..), getUnique )
+import Unique ( Uniquable(..), Unique(..), getUnique, mkCoVarUnique )
+import Name ( mkSystemName )
+import OccName ( mkVarOcc )
 import Class ( Class(..) )
 import ConLike ( ConLike(..) )
 import Coercion ( emptyCvSubstEnv )
@@ -44,8 +48,8 @@ import Hastic.Util
 import Hastic.Lang
 
 apptree_ast :: AppTree -> [LHsExpr GhcTc]
-apptree_ast (BT n ch) = apptree_ast' (noLoc (HsVar NoExt (noLoc n))) ch where
-  apptree_ast' term (arg:rest) = concatMap (concatMap (flip apptree_ast' rest . noLoc . HsApp NoExt term) . apptree_ast) arg
+apptree_ast (BT n ch) = apptree_ast' (noLoc (HsVar NoExt n)) ch where
+  apptree_ast' term (arg:rest) = concatMap (concatMap (flip apptree_ast' rest . noLoc . HsPar NoExt . noLoc . HsApp NoExt term) . apptree_ast) arg
   apptree_ast' term [] = [term]
 
 map2subst :: Map Id Type -> TCvSubst
@@ -67,9 +71,10 @@ unify x y = liftA2 (,) (unify' y x) (unify' x y) where -- sorry for flipped args
     in if | null app_args_b
           , Just bvar <- getTyVar_maybe b -> Just (M.singleton bvar a) -- `b` is totally free (or something else unexpected)
           | Just (tycon_a, tyargs_a) <- splitTyConApp_maybe a -- `a` is a true TyCon
-          -> case splitTyConApp_maybe app_con_b of
+          -> case splitTyConApp_maybe b of
             Just (tycon_b, tyargs_b) -- `b` is also a true TyCon
-              | tycon_a == tycon_b -> masum $ zip tyargs_a tyargs_b
+              | tycon_a == tycon_b
+              -> masum $ zip tyargs_a tyargs_b
               | otherwise -> Nothing
             Nothing
               | length tyargs_a >= length app_args_b
@@ -120,12 +125,12 @@ find_funs = find_funs' mempty where
   find_funs' s = (concat . gmapQ (find_funs' s))
     `extQ` ((\case
         AbsBinds { abs_tvs, abs_ev_vars, abs_binds } -> find_funs' (ev_to_ctx abs_ev_vars ++ s) abs_binds
-        FunBind { fun_id, fun_matches } -> [(s, unLoc fun_id)]
+        FunBind { fun_id, fun_matches } -> [(s, fun_id)]
         _ -> mempty
       ) :: HsBind GhcTc -> [Fun])
 
-concretize :: ClassInstMap -> Fun -> Maybe (Id, [Type])
-concretize inst_map raw_fun = fmap (snd raw_fun,) $ uncurry ((tyfind .) . TFState) $ second varType raw_fun where
+concretize :: ClassInstMap -> Fun -> Maybe (Located Id, [Type])
+concretize inst_map raw_fun = fmap (snd raw_fun,) $ uncurry ((tyfind .) . TFState) $ second (varType . unLoc) raw_fun where
   tyfind :: TFState -> Maybe [Type]
   tyfind st@(TFState { ctx, sig })
     | Just (cn@(cn_cls, (cn_ty, cn_args)), ctx_rest) <- uncons ctx
@@ -165,6 +170,9 @@ concretize inst_map raw_fun = fmap (snd raw_fun,) $ uncurry ((tyfind .) . TFStat
         
     | otherwise = Just [sig] -- BASE CASE: no more constraints: this passed
 
+bot_var :: Located Id
+bot_var = noLoc $ mkCoVar (mkSystemName (mkCoVarUnique 0) (mkVarOcc "_|_")) (mkStrLitTy (fsLit "_|_"))
+
 analyze_all :: LHsBinds GhcTc -> [LHsExpr GhcTc]
 analyze_all binds =
   let inst_map = find_insts binds
@@ -173,14 +181,14 @@ analyze_all binds =
       -- funs :: Map Id [Type]
       funs = M.fromList $ catMaybes $ map (concretize inst_map) raw_funs
       
-      expand_fun :: Int -> Id -> Maybe AppTree
-      expand_fun n _ | n <= 0 = Nothing
+      expand_fun :: Int -> Located Id -> Maybe AppTree
+      expand_fun n _ | n <= 0 = Just (BT bot_var mempty)
       expand_fun n f0 =
-        let (f0_args, f0_ret) = splitFunTys (varType f0)
-        
-            go :: [Type] -> Maybe [[AppTree]]
-            go [] = Just mempty
-            go (arg0:argrest) =
+        let (f0_args, _f0_ret) = splitFunTys (varType $ unLoc f0)
+            go :: Int -> [Type] -> Maybe [[AppTree]]
+            go 0 args = Just $ map (const [BT bot_var mempty]) args
+            go n' [] = Just mempty
+            go n' (arg0:argrest) =
               foldr (\a b ->
                   (liftA2 ((map (uncurry (<>)) .) . zip) a b) <|> a <|> b -- disjunction
                 ) Nothing -- transpose of sorts, squeeze outer list (of alternatives) into innermost list (of alternatives) per arg: all arg lengths equal by design
@@ -190,15 +198,15 @@ analyze_all binds =
                     let (fn_args, fn_ret) = splitFunTys fn_ty
                     in [
                         do
-                          (arg0_mapper, fn_mapper) <- unify arg0 fn_ret
-                          this_exprs <- expand_fun (n - 1) (setVarType fn_var $ substTy (map2subst fn_mapper) (mkFunTys fn_args' (mkFunTys fn_ret_args fn_ret)))
-                          next_exprs <- go (substTys (map2subst arg0_mapper) argrest)
-                          return ([this_exprs] : next_exprs) -- why is this list wrapped? it's a bit odd... maybe awaiting concat at the outer level
-                        | (fn_args', fn_ret_args) <- zip (reverse (subsequences fn_args)) (map reverse $ subsequences (reverse fn_args))
+                          (arg0_mapper, fn_mapper) <- both map2subst <$> unify arg0 fn_ret
+                          this_exprs <- go (n' - 1) (substTys fn_mapper fn_args')
+                          next_exprs <- go n' (substTys arg0_mapper argrest)
+                          return ([BT fn_var this_exprs] : next_exprs) -- why is this list wrapped? it's a bit odd... maybe awaiting concat at the outer level
+                        | fn_args' <- drop 1 $ subsequences fn_args -- drop the empty-arg function alternative to protect the true base case
                       ]
                   ) fn_tys
               ) $ M.toList funs
-        in BT f0 <$> go f0_args
+        in BT f0 <$> go n f0_args
       
       
-  in concat $ catMaybes $ map (fmap apptree_ast . expand_fun 10) $ concatMap (uncurry (map . (uncurry setVarType .) . (,))) $ M.toList $ funs
+  in concat $ catMaybes $ map (fmap apptree_ast . expand_fun 5) $ concatMap (uncurry (map . ((\(var, ty) -> (flip setVarType ty) <$> var) .) . (,))) $ M.toList $ funs
