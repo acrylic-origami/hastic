@@ -178,13 +178,13 @@ concretize inst_map raw_fun = fmap (snd raw_fun,) $ uncurry ((tyfind .) . TFStat
 bot_var :: Located Id
 bot_var = noLoc $ mkCoVar (mkSystemName (mkCoVarUnique 0) (mkVarOcc "_|_")) (mkStrLitTy (fsLit "_|_"))
 
-analyze :: LHsBinds GhcTc -> IO [LHsExpr GhcTc]
-analyze binds = do
+analyze :: Int -> LHsBinds GhcTc -> IO [LHsExpr GhcTc]
+analyze depth binds = do
   let inst_map = find_insts binds
       raw_funs = find_funs binds
       
       -- funs :: Map Id [Type]
-      funs = M.fromList $ catMaybes $ map (concretize inst_map) raw_funs
+      funs = catMaybes $ map (concretize inst_map) raw_funs
       
       expand_fun :: Int -> Located Id -> IO (Maybe AppTree)
       expand_fun n _ | n <= 0 = return $ Just (BT bot_var mempty)
@@ -198,29 +198,21 @@ analyze binds = do
                   (liftA2 ((map (uncurry (<>)) .) . zip) a b) <|> a <|> b -- disjunction
                 ) Nothing -- transpose of sorts, squeeze outer list (of alternatives) into innermost list (of alternatives) per arg: all arg lengths equal by design
               -- disjunction, but not mconcat because it cats the wrong list dimension
-              . concat <$> mapM (\(fn_var, fn_tys) -> -- IO [Maybe [[BiTree Id]]]: alts-args-alts
+              . concat <$> mapM (\(fn_var, fn_tys) -> do -- IO [Maybe [[BiTree Id]]]: alts-args-alts
                 concat <$> mapM (\fn_ty ->
                     let (fn_args, fn_ret) = splitFunTys fn_ty
-                    in mapM (\fn_args' -> runMaybeT $ do 
+                    in mapM (\(fn_args', fn_ret') -> runMaybeT $ do 
                         rn <- lift $ randomRIO (0, 255 :: Int)
-                        if rn > 190
+                        if rn > 140
                         then do
-                          (arg0_mapper, fn_mapper) <- liftM $ both map2subst <$> unify arg0 fn_ret
+                          (arg0_mapper, fn_mapper) <- liftM $ both map2subst <$> unify arg0 fn_ret'
                           this_exprs <- MaybeT $ go (n' - 1) (substTys fn_mapper fn_args')
                           next_exprs <- MaybeT $ go n' (substTys arg0_mapper argrest)
                           return ([BT fn_var this_exprs] : next_exprs)
                         else liftM Nothing
-                        
-                        -- return $ if rn > 250
-                        --   then do
-                        --     (arg0_mapper, fn_mapper) <- both map2subst <$> unify arg0 fn_ret
-                        --     this_exprs <- go (n' - 1) (substTys fn_mapper fn_args')
-                        --     next_exprs <- go n' (substTys arg0_mapper argrest)
-                        --     return ([BT fn_var this_exprs] : next_exprs) -- why is this list wrapped? it's a bit odd... maybe awaiting concat at the outer level
-                        --   else mempty
-                      ) (drop 1 $ subsequences fn_args) -- drop the empty-arg function alternative to protect the true base case
+                      ) (zip (subsequences fn_args) (reverse $ map ((`mkFunTys` fn_ret) . reverse) $ subsequences (reverse fn_args))) -- drop the empty-arg function alternative to protect the true base case
                   ) fn_tys
-              ) (M.toList funs)
+              ) funs
         in fmap (BT f0) <$> go n f0_args
       
-  concat . catMaybes <$> (mapM (fmap (fmap apptree_ast) . expand_fun 15) $ concatMap (uncurry (map . ((\(var, ty) -> (flip setVarType ty) <$> var) .) . (,))) $ M.toList $ funs)
+  concat . catMaybes <$> (mapM (fmap (fmap apptree_ast) . expand_fun depth) $ concatMap (uncurry (map . ((\(var, ty) -> (flip setVarType ty) <$> var) .) . (,))) $ funs)

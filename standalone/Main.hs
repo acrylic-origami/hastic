@@ -37,7 +37,8 @@ constr_var_ppr = everything_ppr (
   )
           
 main = do
-  mod_str:args' <- getArgs
+  mod_str:depth':args' <- getArgs
+  let depth = read depth'
   runGhc (Just libdir) $ do
     dflags <- getSessionDynFlags
     setSessionDynFlags $ dflags {
@@ -64,4 +65,4 @@ main = do
       -- putStrLn $ ppr_unsafe $ map (concretize inst_map) (find_funs tl_binds)
       -- putStrLn $ ppr_unsafe $ varType $ head $ head $ map (uncurry (map . (uncurry setVarType .) . (,))) $ M.toList $ funs
       
-      analyze tl_binds >>= putStrLn . ppr_unsafe
+      analyze depth tl_binds >>= putStrLn . ppr_unsafe
