@@ -139,24 +139,23 @@ concretize :: ClassInstMap -> Fun -> Maybe (Located Id, [Type])
 concretize inst_map raw_fun = fmap (snd raw_fun,) $ uncurry ((tyfind .) . TFState) $ second (varType . unLoc) raw_fun where
   tyfind :: TFState -> Maybe [Type]
   tyfind st@(TFState { ctx, sig })
-    | Just (cn@(cn_cls, (cn_ty, cn_args)), ctx_rest) <- uncons ctx
-    = let cn_tyhead = dropForAlls $ fromMaybe cn_ty $ fmap fst $ splitAppTy_maybe cn_ty -- TODO can we have foralls in constraints? if so, what do they do?
-          -- sub_ty is the instance head 
-          iter :: Maybe TyVar -> TyCon -> Inst -> Maybe [Type]
-          iter m_cn_tyvar tycon (cns', inst_args) =
+    | Just (cn@(cn_cls, (cn_tyhead, cn_args)), ctx_rest) <- uncons ctx
+    = let -- closes over cn_args, cn_tyhead
+          iter :: TyCon -> Inst -> Maybe [Type]
+          iter inst_tycon (cns', inst_args) =
             if length inst_args >= length cn_args
               then
                 let ((inst_argsl, inst_argsr), (cn_argsl, cn_argsr)) = rmatch inst_args cn_args
                     m_sig_subst = flip (TCvSubst emptyInScopeSet) emptyCvSubstEnv
-                      . flip unitUFM (mkTyConApp tycon inst_argsl)
-                      <$> m_cn_tyvar -- sub protected by arity: still free in fun side
+                      . flip unitUFM (mkTyConApp inst_tycon inst_argsl)
+                      <$> (getTyVar_maybe cn_tyhead) -- sub protected by arity: still free in fun side
                     m_inst_subst_map = fmap snd $ foldr (liftA2 (<>) . uncurry unify) (Just mempty) (zip cn_argsr inst_argsr)
                 in case m_inst_subst_map of
                   Just inst_subst_map ->
                     let inst_subst = map2subst inst_subst_map
                         subbed_ctx_rest' = map (second (substTy inst_subst *** substTys inst_subst)) ctx_rest
                         subbed_inst_ctx = map (second (substTy inst_subst *** substTys inst_subst)) cns'
-                    in tyfind $ TFState {
+                    in trace (ppr_unsafe (cn, subbed_ctx_rest', inst_tycon, inst_args, subbed_inst_ctx)) $ tyfind $ TFState {
                       ctx = subbed_ctx_rest' <> subbed_inst_ctx,
                       sig = fromMaybe sig $ flip substTy sig <$> m_sig_subst
                     }
@@ -164,14 +163,14 @@ concretize inst_map raw_fun = fmap (snd raw_fun,) $ uncurry ((tyfind .) . TFStat
     in case getTyVar_maybe cn_tyhead of
         
       -- new tyvar, need to find instances
-      Just cn_tyvar -> join $ fmap (mconcat . concatMap (uncurry (map . (uncurry (iter (Just cn_tyvar)) .) . (,))) . M.toList) $ M.lookup cn_cls inst_map
+      Just cn_tyvar -> join $ fmap (mconcat . concatMap (uncurry (map . (uncurry iter .) . (,))) . M.toList) $ M.lookup cn_cls inst_map
         -- note the mconcat: this is the disjunction
         
       -- [old] tycon, need to verify instances
       Nothing -> case tyConAppTyCon_maybe cn_tyhead of
-        Just cn_tycon
-          | Just (Just insts) <- M.lookup cn_tycon <$> M.lookup cn_cls inst_map
-          -> mconcat $ map (iter Nothing cn_tycon) insts
+        Just inst_tycon
+          | Just (Just insts) <- M.lookup inst_tycon <$> M.lookup cn_cls inst_map
+          -> mconcat $ map (iter inst_tycon) insts
         Nothing -> Nothing -- or panic?
         
     | otherwise = Just [sig] -- BASE CASE: no more constraints: this passed
