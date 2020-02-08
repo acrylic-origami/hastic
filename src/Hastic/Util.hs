@@ -1,7 +1,16 @@
+{-# LANGUAGE Rank2Types #-}
 module Hastic.Util where
+
+import Outputable ( Outputable(..), showPpr, interppSP, showSDocUnsafe )
+import Var ( varName )
+import Name ( nameOccName )
+import OccName ( occNameString )
 
 import Control.Applicative
 import Control.Monad.Trans.Maybe ( MaybeT(..) )
+
+import Data.Functor.Identity
+import Data.Generics ( Data(..), GenericT )
 
 -- a is candidate function _to_ substitute, b is function being substituted
 -- we want b to be more general than a: the return is a Map of tyvars in b back to things in a
@@ -30,3 +39,7 @@ rmatch :: [a] -> [b] -> (([a], [a]), ([b], [b]))
 rmatch a b =
   let min_len = min (length a) (length b)
   in (splitAt (length a - min_len) a, splitAt (length b - min_len) b)
+ppr_unsafe :: Outputable a => a -> String
+ppr_unsafe = showSDocUnsafe . interppSP . pure
+
+varString = occNameString . nameOccName . varName

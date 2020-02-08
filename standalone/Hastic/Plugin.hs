@@ -2,6 +2,8 @@
 module Hastic.Plugin where
 
 import Hastic
+import Hastic.Lang
+import Hastic.Util ( strictify, ppr_unsafe )
 import GhcPlugins ( Plugin(..), impurePlugin, defaultPlugin, CommandLineOption, extractDynFlags )
 import GHC.Paths ( libdir )
 import GHC
@@ -16,8 +18,6 @@ import Control.Arrow ( (&&&), (***), first, second )
 import Control.Monad
 import System.IO.Unsafe ( unsafePerformIO )
 import Control.Monad.IO.Class
-
-import Ra.Lang.Extra ( ppr_unsafe )
 
 plugin :: Plugin
 plugin = defaultPlugin {

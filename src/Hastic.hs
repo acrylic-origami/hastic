@@ -48,9 +48,6 @@ import qualified Data.IntMap as IM
 import Data.Map.Strict ( Map(..) )
 import qualified Data.Map.Strict as M
 
-import Ra.Lang.Extra ( ppr_unsafe )
-import Ra.GHC.Util ( splitFunTysLossy )
-
 import Hastic.Util
 import Hastic.Lang
 
