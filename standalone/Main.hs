@@ -21,7 +21,7 @@ import Data.Generics.Extra ( everything_ppr )
 import qualified Data.Map.Strict as M
 
 import Hastic
-import Hastic.Util ( ppr_unsafe, varString )
+import Hastic.Util ( strictify, ppr_unsafe, varString )
 
 module_tcs :: GhcMonad m => ModSummary -> m TypecheckedModule
 module_tcs = (typecheckModule=<<) . parseModule
@@ -62,7 +62,7 @@ main = do
     -- liftIO $ putStrLn $ ppr_unsafe $ tyfind (TFState (ev_to_ctx $ snd $ head $ fst $ head funs) (varType $ fst $ snd $ head funs))
     liftIO $ do
       let inst_map = find_insts tl_binds
-          !prep = prepare tl_binds
+          !prep = strictify $ prepare tl_binds
       -- putStrLn $ ppr_unsafe $ map (concretize inst_map) (find_funs tl_binds)
       -- putStrLn $ ppr_unsafe $ varType $ head $ head $ map (uncurry (map . (uncurry setVarType .) . (,))) $ M.toList $ funs
       -- putStrLn $ show $ length $ snd prep

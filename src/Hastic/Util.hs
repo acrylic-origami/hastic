@@ -39,6 +39,17 @@ rmatch :: [a] -> [b] -> (([a], [a]), ([b], [b]))
 rmatch a b =
   let min_len = min (length a) (length b)
   in (splitAt (length a - min_len) a, splitAt (length b - min_len) b)
+
+-- strict transformer
+gmapT' :: GenericT -> GenericT
+gmapT' f x0 = runIdentity (gfoldl k Identity x0)
+  where
+    k :: Data d => Identity (d->b) -> d -> Identity b
+    k (Identity c) x = Identity $! c $! f x -- let the user control strictness in `f`
+
+strictify :: GenericT
+strictify = gmapT' strictify
+
 ppr_unsafe :: Outputable a => a -> String
 ppr_unsafe = showSDocUnsafe . interppSP . pure
 
