@@ -5,7 +5,8 @@ module Hastic (
   find_funs,
   concretize,
   unify,
-  apptree_ast
+  apptree_ast,
+  prepare
 ) where
 
 import GHC
@@ -26,6 +27,7 @@ import UniqFM ( UniqFM(..), listToUFM, unitUFM )
 
 import System.Environment ( getArgs )
 import System.Random ( randomRIO )
+import System.Random.Shuffle ( shuffle )
 
 import Data.Bitraversable
 import Data.Foldable ( foldrM )
@@ -52,6 +54,8 @@ import Ra.GHC.Util ( splitFunTysLossy )
 import Hastic.Util
 import Hastic.Lang
 
+import Debug.Trace ( trace )
+
 apptree_ast :: AppTree -> [LHsExpr GhcTc]
 apptree_ast (BT n ch) = apptree_ast' (noLoc (HsVar NoExt n)) ch where
   apptree_ast' term (arg:rest) = concatMap (concatMap (flip apptree_ast' rest . noLoc . HsPar NoExt . noLoc . HsApp NoExt term) . apptree_ast) arg
@@ -61,7 +65,7 @@ map2subst :: Map Id Type -> TCvSubst
 map2subst m = TCvSubst emptyInScopeSet (listToUFM $ M.toList m) emptyCvSubstEnv
 
 ev_to_ctx :: [EvVar] -> [Constraint]
-ev_to_ctx = catMaybes . map (join . fmap (uncurry (liftA2 (,)) . (tyConClass_maybe *** fmap splitAppTys . one)) . splitTyConApp_maybe . varType)
+ev_to_ctx = catMaybes . map (join . fmap (uncurry (liftA2 (,)) . (tyConClass_maybe *** fmap (splitAppTys . dropForAlls) . one)) . splitTyConApp_maybe . varType) -- the `one` assumes single-param classes: i.e. class tycon application has one argument: other classes are ignored
 
 -- max_concrete :: Type -> Type -> Type
 -- max_concrete a b = if n_concrete a > n_concrete b then a else b where
@@ -178,15 +182,14 @@ concretize inst_map raw_fun = fmap (snd raw_fun,) $ uncurry ((tyfind .) . TFStat
 bot_var :: Located Id
 bot_var = noLoc $ mkCoVar (mkSystemName (mkCoVarUnique 0) (mkVarOcc "_|_")) (mkStrLitTy (fsLit "_|_"))
 
-analyze :: Int -> LHsBinds GhcTc -> IO [LHsExpr GhcTc]
-analyze depth binds = do
+prepare :: LHsBinds GhcTc -> (ClassInstMap, [(Located Id, [Type])])
+prepare binds =
   let inst_map = find_insts binds
-      raw_funs = find_funs binds
-      
-      -- funs :: Map Id [Type]
-      funs = catMaybes $ map (concretize inst_map) raw_funs
-      
-      expand_fun :: Int -> Located Id -> IO (Maybe AppTree)
+  in (inst_map, catMaybes $ map (concretize inst_map) $ find_funs binds)
+
+analyze :: Int -> ClassInstMap -> [(Located Id, [Type])] -> IO [LHsExpr GhcTc]
+analyze depth inst_map funs = do
+  let expand_fun :: Int -> Located Id -> IO (Maybe AppTree)
       expand_fun n _ | n <= 0 = return $ Just (BT bot_var mempty)
       expand_fun n f0 =
         let (f0_args, _f0_ret) = splitFunTys (varType $ unLoc f0)
@@ -199,19 +202,22 @@ analyze depth binds = do
                 ) Nothing -- transpose of sorts, squeeze outer list (of alternatives) into innermost list (of alternatives) per arg: all arg lengths equal by design
               -- disjunction, but not mconcat because it cats the wrong list dimension
               . concat <$> mapM (\(fn_var, fn_tys) -> do -- IO [Maybe [[BiTree Id]]]: alts-args-alts
-                concat <$> mapM (\fn_ty ->
+                argshuffle <- reverse <$> mapM (randomRIO . (0,)) [1..(length fn_tys - 1)]
+                concat <$> mapM (\fn_ty -> do
                     let (fn_args, fn_ret) = splitFunTys fn_ty
-                    in mapM (\(fn_args', fn_ret') -> runMaybeT $ do 
-                        rn <- lift $ randomRIO (0, 255 :: Int)
-                        if rn > 140
-                        then do
-                          (arg0_mapper, fn_mapper) <- liftM $ both map2subst <$> unify arg0 fn_ret'
-                          this_exprs <- MaybeT $ go (n' - 1) (substTys fn_mapper fn_args')
-                          next_exprs <- MaybeT $ go n' (substTys arg0_mapper argrest)
-                          return ([BT fn_var this_exprs] : next_exprs)
-                        else liftM Nothing
-                      ) (zip (subsequences fn_args) (reverse $ map ((`mkFunTys` fn_ret) . reverse) $ subsequences (reverse fn_args))) -- drop the empty-arg function alternative to protect the true base case
-                  ) fn_tys
+                    mapM (\(fn_args', fn_ret') -> runMaybeT $ do
+                        (arg0_mapper, fn_mapper) <- liftM $ both map2subst <$> unify arg0 fn_ret'
+                        this_exprs <- MaybeT $ go (n' - 1) (substTys fn_mapper fn_args')
+                        next_exprs <- MaybeT $ go n' (substTys arg0_mapper argrest)
+                        return ([BT fn_var this_exprs] : next_exprs)
+                      ) (zip
+                          (subsequences fn_args)
+                          (reverse $ map
+                              ((`mkFunTys` fn_ret) . reverse)
+                              (subsequences (reverse fn_args))
+                            )
+                        )
+                  ) (take (max 1 $ length fn_tys `div` 8) $ shuffle fn_tys argshuffle)
               ) funs
         in fmap (BT f0) <$> go n f0_args
       

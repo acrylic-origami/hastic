@@ -18,14 +18,14 @@ extra-source-files:  CHANGELOG.md
 
 library
   exposed-modules:     Hastic, Hastic.Plugin, Hastic.Lang, Hastic.Util
-  build-depends:       base >=4.12 && <4.13, ghc, ghc-paths, syb, syb-extra, rahse, containers, deque, random, transformers, mtl
+  build-depends:       base >=4.12 && <4.13, ghc, ghc-paths, syb, syb-extra, rahse, containers, deque, random, transformers, mtl, random-shuffle
   hs-source-dirs:      src, standalone
   default-language:    Haskell2010
 
 executable hastic-debug
   main-is:             Main.hs
   other-modules:     Hastic, Hastic.Plugin, Hastic.Lang, Hastic.Util
-  build-depends:       base >=4.12 && <4.13, ghc, ghc-paths, syb, syb-extra, rahse, containers, deque, random, transformers, mtl
+  build-depends:       base >=4.12 && <4.13, ghc, ghc-paths, syb, syb-extra, rahse, containers, deque, random, transformers, mtl, random-shuffle
   hs-source-dirs:      src, standalone
   default-language:    Haskell2010
   

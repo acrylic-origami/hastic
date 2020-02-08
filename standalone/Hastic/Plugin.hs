@@ -1,3 +1,4 @@
+{-# LANGUAGE BangPatterns #-}
 module Hastic.Plugin where
 
 import Hastic
@@ -9,6 +10,7 @@ import Data.IORef
 import HscTypes
 import TcRnTypes
 import Bag ( unionManyBags )
+import qualified Data.Map.Strict as M
 
 import Control.Arrow ( (&&&), (***), first, second )
 import Control.Monad
@@ -23,16 +25,19 @@ plugin = defaultPlugin {
     , pluginRecompile = impurePlugin
   }
 
-global_binds :: IORef [LHsBinds GhcTc]
+global_binds :: IORef [(ClassInstMap, [(Located Id, [Type])])]
 global_binds = unsafePerformIO $ newIORef []
 
 install :: [CommandLineOption] -> ModSummary -> TcGblEnv -> TcM TcGblEnv
 install opts _ms tc_gbl = do
   env <- getEnv
   let dflags = extractDynFlags env
-  binds <- liftIO $ atomicModifyIORef global_binds ((id &&& id) . (tcg_binds tc_gbl :))
+  !binds <- liftIO $ atomicModifyIORef' global_binds ((id &&& id) . ((prepare $ tcg_binds tc_gbl) :))
+  liftIO $ putStrLn "REV1"
+  liftIO $ putStrLn $ show $ length $ snd $ head $ binds
   
   when (length binds == (length $ hsc_targets $ env_top env)) $ liftIO $ do
-    (analyze 10 $ unionManyBags binds) >>= putStrLn . ppr_unsafe
+    putStrLn "ANALYZING!!"
+    (uncurry (analyze 4) $ (M.unionsWith (M.unionWith (++)) *** mconcat) $ unzip binds) >>= putStrLn . ppr_unsafe
   
   return tc_gbl

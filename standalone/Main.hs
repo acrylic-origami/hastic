@@ -38,7 +38,8 @@ constr_var_ppr = everything_ppr (
           
 main = do
   mod_str:depth':args' <- getArgs
-  let depth = read depth'
+  let depth :: Int
+      depth = read depth'
   runGhc (Just libdir) $ do
     dflags <- getSessionDynFlags
     setSessionDynFlags $ dflags {
@@ -62,7 +63,8 @@ main = do
     -- liftIO $ putStrLn $ ppr_unsafe $ tyfind (TFState (ev_to_ctx $ snd $ head $ fst $ head funs) (varType $ fst $ snd $ head funs))
     liftIO $ do
       let inst_map = find_insts tl_binds
+          !prep = repare tl_binds
       -- putStrLn $ ppr_unsafe $ map (concretize inst_map) (find_funs tl_binds)
       -- putStrLn $ ppr_unsafe $ varType $ head $ head $ map (uncurry (map . (uncurry setVarType .) . (,))) $ M.toList $ funs
-      
-      analyze depth tl_binds >>= putStrLn . ppr_unsafe
+      return ()
+      -- uncurry (analyze depth) prep >>= putStrLn . ppr_unsafe
