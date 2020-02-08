@@ -135,10 +135,11 @@ find_funs = find_funs' mempty where
         _ -> mempty
       ) :: HsBind GhcTc -> [Fun])
 
-concretize :: ClassInstMap -> Fun -> Maybe (Located Id, [Type])
-concretize inst_map raw_fun = fmap (snd raw_fun,) $ uncurry ((tyfind .) . TFState) $ second (varType . unLoc) raw_fun where
-  tyfind :: TFState -> Maybe [Type]
-  tyfind st@(TFState { ctx, sig })
+concretize :: Int -> ClassInstMap -> Fun -> Maybe (Located Id, [Type])
+concretize depth inst_map raw_fun = fmap (snd raw_fun,) $ uncurry ((tyfind depth .) . TFState) $ second (varType . unLoc) raw_fun where
+  tyfind :: Int -> TFState -> Maybe [Type]
+  tyfind 0 _ = Nothing
+  tyfind n st@(TFState { ctx, sig })
     | Just (cn@(cn_cls, (cn_tyhead, cn_args)), ctx_rest) <- uncons ctx
     = let -- closes over cn_args, cn_tyhead
           iter :: TyCon -> Inst -> Maybe [Type]
@@ -155,7 +156,7 @@ concretize inst_map raw_fun = fmap (snd raw_fun,) $ uncurry ((tyfind .) . TFStat
                     let inst_subst = map2subst inst_subst_map
                         subbed_ctx_rest' = map (second (substTy inst_subst *** substTys inst_subst)) ctx_rest
                         subbed_inst_ctx = map (second (substTy inst_subst *** substTys inst_subst)) cns'
-                    in trace (ppr_unsafe (cn, subbed_ctx_rest', inst_tycon, inst_args, subbed_inst_ctx)) $ tyfind $ TFState {
+                    in trace (ppr_unsafe (cn, subbed_ctx_rest', inst_tycon, inst_args, subbed_inst_ctx)) $ tyfind (n - 1) $ TFState {
                       ctx = subbed_ctx_rest' <> subbed_inst_ctx,
                       sig = fromMaybe sig $ flip substTy sig <$> m_sig_subst
                     }
@@ -178,15 +179,15 @@ concretize inst_map raw_fun = fmap (snd raw_fun,) $ uncurry ((tyfind .) . TFStat
 bot_var :: Located Id
 bot_var = noLoc $ mkCoVar (mkSystemName (mkCoVarUnique 0) (mkVarOcc "_|_")) (mkStrLitTy (fsLit "_|_"))
 
-prepare :: LHsBinds GhcTc -> (ClassInstMap, [(Located Id, [Type])])
-prepare binds =
+prepare :: Int -> LHsBinds GhcTc -> (ClassInstMap, [(Located Id, [Type])])
+prepare depth binds =
   let inst_map = find_insts binds
-  in (inst_map, catMaybes $ map (concretize inst_map) $ find_funs binds)
+  in (inst_map, catMaybes $ map (concretize depth inst_map) $ find_funs binds)
 
 analyze :: Int -> ClassInstMap -> [(Located Id, [Type])] -> IO [LHsExpr GhcTc]
 analyze depth inst_map funs = do
   let expand_fun :: Int -> Located Id -> IO (Maybe AppTree)
-      expand_fun n _ | n <= 0 = return $ Just (BT bot_var mempty)
+      expand_fun 0 _ = return $ Just (BT bot_var mempty)
       expand_fun n f0 =
         let (f0_args, _f0_ret) = splitFunTys (varType $ unLoc f0)
             go :: Int -> [Type] -> IO (Maybe [[AppTree]])
@@ -216,5 +217,7 @@ analyze depth inst_map funs = do
                   ) (take (max 1 $ length fn_tys `div` 8) $ shuffle fn_tys argshuffle)
               ) funs
         in fmap (BT f0) <$> go n f0_args
+      flat_funs :: [Located Id]
+      flat_funs = concatMap (uncurry (map . fmap (flip setVarType))) $ funs
       
-  concat . catMaybes <$> (mapM (fmap (fmap apptree_ast) . expand_fun depth) $ concatMap (uncurry (map . ((\(var, ty) -> (flip setVarType ty) <$> var) .) . (,))) $ funs)
+  concat . catMaybes <$> (mapM (fmap (fmap apptree_ast) . expand_fun depth) $ )

@@ -62,7 +62,7 @@ main = do
     -- liftIO $ putStrLn $ ppr_unsafe $ tyfind (TFState (ev_to_ctx $ snd $ head $ fst $ head funs) (varType $ fst $ snd $ head funs))
     liftIO $ do
       let inst_map = find_insts tl_binds
-          !prep = strictify $ prepare tl_binds
+          !prep = strictify $ prepare depth tl_binds
       -- putStrLn $ ppr_unsafe $ map (concretize inst_map) (find_funs tl_binds)
       -- putStrLn $ ppr_unsafe $ varType $ head $ head $ map (uncurry (map . (uncurry setVarType .) . (,))) $ M.toList $ funs
       -- putStrLn $ show $ length $ snd prep

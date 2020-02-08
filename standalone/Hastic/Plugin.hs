@@ -32,8 +32,8 @@ install :: [CommandLineOption] -> ModSummary -> TcGblEnv -> TcM TcGblEnv
 install opts _ms tc_gbl = do
   env <- getEnv
   let dflags = extractDynFlags env
-  !binds <- liftIO $ atomicModifyIORef' global_binds ((id &&& id) . ((strictify $ prepare $ tcg_binds tc_gbl) :))
-  liftIO $ putStrLn "REV1"
+  !binds <- liftIO $ atomicModifyIORef' global_binds ((id &&& id) . ((strictify $ prepare 4 $ tcg_binds tc_gbl) :))
+  liftIO $ putStrLn "REV2"
   liftIO $ putStrLn $ show $ length $ snd $ head $ binds
   
   when (length binds == (length $ hsc_targets $ env_top env)) $ liftIO $ do
