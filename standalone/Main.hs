@@ -1,4 +1,4 @@
-{-# LANGUAGE LambdaCase, Rank2Types, NamedFieldPuns, TupleSections , MultiWayIf #-}
+{-# LANGUAGE LambdaCase, Rank2Types, NamedFieldPuns, TupleSections , MultiWayIf, BangPatterns #-}
 module Main where
 
 import GHC
@@ -16,6 +16,8 @@ import Outputable ( Outputable, interppSP, showSDocUnsafe, showPpr )
 import System.Environment ( getArgs )
 
 import Control.Monad.IO.Class ( liftIO )
+import Control.Monad.Random ( evalRand )
+import System.Random ( getStdGen )
 import Data.Generics ( Data(..), extQ )
 import Data.Generics.Extra ( everything_ppr )
 import qualified Data.Map.Strict as M
@@ -66,5 +68,7 @@ main = do
       -- putStrLn $ ppr_unsafe $ map (concretize inst_map) (find_funs tl_binds)
       -- putStrLn $ ppr_unsafe $ varType $ head $ head $ map (uncurry (map . (uncurry setVarType .) . (,))) $ M.toList $ funs
       -- putStrLn $ show $ length $ snd prep
-      return ()
-      -- uncurry (analyze depth) prep >>= putStrLn . ppr_unsafe
+      -- return ()
+      putStrLn ("Analyzing: " ++ (show $ length $ snd prep) ++ " functions, " ++ (show $ M.foldr' ((+) . M.foldr' ((+) . length) 0) 0 $ fst prep) ++ " instances")
+      gen <- getStdGen
+      putStrLn $ ppr_unsafe $ head $ concat $ evalRand (sequence $ uncurry (analyze depth) prep) gen

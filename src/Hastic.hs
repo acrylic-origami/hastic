@@ -26,8 +26,9 @@ import VarEnv ( emptyInScopeSet )
 import UniqFM ( UniqFM(..), listToUFM, unitUFM )
 
 import System.Environment ( getArgs )
-import System.Random ( randomRIO )
-import System.Random.Shuffle ( shuffle )
+import Control.Monad.Random.Class ( MonadRandom(..) )
+import Control.Monad.Random ( Rand(..) )
+import System.Random ( StdGen(..) )
 
 import Data.Bitraversable
 import Data.Foldable ( foldrM )
@@ -193,21 +194,33 @@ prepare depth binds =
   let inst_map = find_insts binds
   in (inst_map, catMaybes $ map (concretize depth inst_map) $ find_funs binds)
 
-analyze :: Int -> ClassInstMap -> [(Located Id, [Type])] -> IO [LHsExpr GhcTc]
-analyze depth inst_map funs =
-  let expand_fun :: Int -> Located Id -> IO AppTree
-      expand_fun 0 _ = return (BT bot_var mempty)
+fRAC = 0.01
+
+mk_app :: [LHsExpr GhcTc] -> LHsExpr GhcTc
+mk_app [expr] = expr
+mk_app exprs = foldr1 ((noLoc.) . HsApp NoExt) exprs
+
+analyze :: Int -> ClassInstMap -> [(Located Id, [Type])] -> [Rand StdGen [LHsExpr GhcTc]] -- one for each function alt
+analyze depth inst_map funs = 
+  let funs' = IM.fromList $ zip [0..] funs
+      expand_fun :: Int -> Located Id -> Rand StdGen [LHsExpr GhcTc]
+      expand_fun 0 _ = return [noLoc (HsVar NoExt bot_var)]
       expand_fun n f0 =
         let (f0_args, _f0_ret) = splitFunTys (varType $ unLoc f0)
-            go :: Int -> [Type] -> IO [[AppTree]]
-            go 0 args = return $ map (const [BT bot_var mempty]) args
+            n_target_funs = IM.size funs' -- floor (fRAC * (fromIntegral $ IM.size funs'))
+            target_funs :: [Rand StdGen (Located Id, [Type])]
+            target_funs = map (fmap (funs' IM.!)) $ replicate n_target_funs (getRandomR (0, IM.size funs' - 1))
+            f0_expr = (HsVar NoExt . noLoc) <$> f0
+            go :: Int -> [Type] -> Rand StdGen [[LHsExpr GhcTc]] -- alt-arg
+            go 0 args = return [[noLoc (HsVar NoExt bot_var)]]
             go n' [] = return mempty
             go n' (arg0:argrest) =
-              foldr (\(fn_var, fn_tys) acc -> do -- IO [[[BiTree Id]]]: alts-args-alts
-                  argshuffle <- reverse <$> mapM (randomRIO . (0,)) [1..(length fn_tys - 1)]
-                  -- have to use IO: MaybeT handling of Nothing (via conjunction) isn't what we want
+              fmap concat $ sequence $ map (\m_fn -> do -- Rand [[LHsExpr]]: alts-args
+                  -- NGL this treatment of the monad sequencing is a bit of a guess, but I think this'll still be lazy to pull up the first result quickly
+                  (fn_var, fn_tys) <- m_fn
                   -- alternatives over function synthesized type definitions
-                  arg_alts <- concat <$> mapM (\fn_ty -> do
+                  -- in particular, sequence here is a bit questionable, but I think it's still right wrt a fast first result
+                  fmap concat $ sequence $ concatMap (\fn_ty ->
                       let (fn_args, fn_ret) = splitFunTys fn_ty
                           arity_alts = (zip
                               (subsequences fn_args)
@@ -217,20 +230,30 @@ analyze depth inst_map funs =
                                 )
                             )
                       -- alternatives over function arity
-                      catMaybes <$> ( -- [[[AppTree]]]
-                          sequence $ map (\(fn_args', fn_ret') -> runMaybeT $ do -- :: Maybe [[AppTree]] -- inner: alts; outer: args
-                              (arg0_mapper, fn_mapper) <- liftM $ both map2subst <$> unify arg0 fn_ret'
-                              this_exprs <- lift $ go (n' - 1) (substTys fn_mapper fn_args')
-                              next_exprs <- lift $ go n' (substTys arg0_mapper argrest)
-                              return ([BT fn_var this_exprs] : next_exprs)
-                            ) arity_alts
-                        )
-                    ) (take (max 1 $ length fn_tys `div` 8) $ shuffle fn_tys argshuffle)
+                      in map (\(fn_args', fn_ret') -> -- :: [Rand [[LHsExpr]]] -- alts-alts-args
+                          case both map2subst <$> unify arg0 fn_ret' of
+                            Just (arg0_mapper, fn_mapper) -> do
+                                next_exprs <- go n' (substTys arg0_mapper argrest)
+                                this_exprs <- go (n' - 1) (substTys fn_mapper fn_args')
+                                -- tricky ordering. We need both results across arguments (breadth), and along functions that match this return type under evaluation (depth). Each has a list of Rand monads over alternatives: we can flatten them in any way to produce a valid list of results. Then we just push that list outward, hoping that it's lazy enough that the list is just the head thunk (should be).
+                                -- I think despite the fact that we've needed to sequence the inner rands over alternatives, it'll still be lazy due to this mixing logic. This is because while Rand encapsulates the list, the list is still lazy, and alt lists are independently lazy: the only dependency is on the one single random number per stage.
+                                return [
+                                    let fn_var_expr :: LHsExpr GhcTc
+                                        fn_var_expr = (HsVar NoExt . noLoc) <$> fn_var
+                                        this_expr' = mk_app this_expr -- from [HsExpr] to HsApp
+                                    in if null this_expr
+                                      then (fn_var_expr : next_expr)
+                                      else (noLoc (HsApp NoExt fn_var_expr this_expr') : next_expr)
+                                    | next_expr <- if null next_exprs then [[]] else next_exprs -- NECESSARY NOW: alts on the outside instead of args
+                                    , this_expr <- this_exprs
+                                  ] -- [Rand [LHsExpr GhcTc]]
+                            Nothing -> return mempty
+                        ) arity_alts
+                    ) fn_tys
                   -- note that although we are iterating over function arities, the function alt under consideration in _this scope_ has fixed arity (see argrest) so we can zip all the alternatives we collect along the argument axis without loss of data
-                  return $ foldl ((map (uncurry (++)) .) . zip) acc arg_alts
-                ) (cycle [[]]) funs
-        in BT f0 <$> go n f0_args
+                ) (map return funs)
+        in map (noLoc . HsApp NoExt f0_expr . mk_app) <$> (go n f0_args)
       flat_funs :: [Located Id]
       !flat_funs = concatMap' (uncurry (map . (\(L l v) t -> L l (setVarType v t)))) $ funs
       
-  in concat <$> (mapM (fmap apptree_ast . expand_fun depth) flat_funs)
+  in map (expand_fun depth) flat_funs

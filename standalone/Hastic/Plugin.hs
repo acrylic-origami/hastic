@@ -17,6 +17,8 @@ import qualified Data.Map.Strict as M
 import Control.Arrow ( (&&&), (***), first, second )
 import Control.Monad
 import System.IO.Unsafe ( unsafePerformIO )
+import Control.Monad.Random ( evalRand )
+import System.Random ( getStdGen )
 import Control.Monad.IO.Class
 
 plugin :: Plugin
@@ -37,10 +39,11 @@ install opts _ms tc_gbl = do
             ret = (num_modules' + 1, (M.unionWith (M.unionWith (++)) instmap instmap', fns <> fns'))
         in (ret, ret)
       )
-  liftIO $ putStrLn "REV4"
+  liftIO $ putStrLn "REV5"
   
   when (num_modules == (length $ hsc_targets $ env_top env)) $ liftIO $ do
     putStrLn ("Analyzing: " ++ (show $ length $ snd binds) ++ " functions, " ++ (show $ M.foldr' ((+) . M.foldr' ((+) . length) 0) 0 $ fst binds) ++ " instances")
-    () <$ uncurry (analyze 4) binds
+    gen <- getStdGen
+    putStrLn $ ppr_unsafe $ (!! 256) $ evalRand (head $ uncurry (analyze 4) binds) gen -- note purity
   
   return tc_gbl
