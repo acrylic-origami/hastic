@@ -6,6 +6,7 @@ import Var ( varName )
 import Name ( nameOccName )
 import OccName ( occNameString )
 
+import Data.Foldable ( foldl' )
 import Control.Applicative
 import Control.Monad.Trans.Maybe ( MaybeT(..) )
 
@@ -34,6 +35,14 @@ asum = foldr (<|>) empty
 snoc = flip (++) . pure
 
 both f (a, b) = (f a, f b)
+
+-- strict concat
+
+concat' :: Foldable t => t [a] -> [a]
+concat' = foldl' (++) []
+
+concatMap' :: Foldable t => (a -> [b]) -> t a -> [b]
+concatMap' f = foldl' ((.f) . (++)) []
 
 rmatch :: [a] -> [b] -> (([a], [a]), ([b], [b]))
 rmatch a b =

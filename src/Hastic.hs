@@ -1,4 +1,4 @@
-{-# LANGUAGE LambdaCase, Rank2Types, NamedFieldPuns, TupleSections , MultiWayIf #-}
+{-# LANGUAGE LambdaCase, Rank2Types, NamedFieldPuns, TupleSections , MultiWayIf, BangPatternss #-}
 module Hastic (
   analyze,
   find_insts,
@@ -156,7 +156,7 @@ concretize depth inst_map raw_fun = fmap (snd raw_fun,) $ uncurry ((tyfind depth
                     let inst_subst = map2subst inst_subst_map
                         subbed_ctx_rest' = map (second (substTy inst_subst *** substTys inst_subst)) ctx_rest
                         subbed_inst_ctx = map (second (substTy inst_subst *** substTys inst_subst)) cns'
-                    in trace (ppr_unsafe (cn, subbed_ctx_rest', inst_tycon, inst_args, subbed_inst_ctx)) $ tyfind (n - 1) $ TFState {
+                    in tyfind (n - 1) $ TFState {
                       ctx = subbed_ctx_rest' <> subbed_inst_ctx,
                       sig = fromMaybe sig $ flip substTy sig <$> m_sig_subst
                     }
@@ -164,7 +164,16 @@ concretize depth inst_map raw_fun = fmap (snd raw_fun,) $ uncurry ((tyfind depth
     in case getTyVar_maybe cn_tyhead of
         
       -- new tyvar, need to find instances
-      Just cn_tyvar -> join $ fmap (mconcat . concatMap (uncurry (map . (uncurry iter .) . (,))) . M.toList) $ M.lookup cn_cls inst_map
+      Just cn_tyvar ->
+        join
+        $ fmap (
+            mconcat
+            . concatMap (
+                uncurry (map . (uncurry iter .) . (,)) -- map original fun id into the inner tuple of possible concrete types
+              )
+            . M.toList
+          )
+        $ M.lookup cn_cls inst_map
         -- note the mconcat: this is the disjunction
         
       -- [old] tycon, need to verify instances
@@ -185,39 +194,43 @@ prepare depth binds =
   in (inst_map, catMaybes $ map (concretize depth inst_map) $ find_funs binds)
 
 analyze :: Int -> ClassInstMap -> [(Located Id, [Type])] -> IO [LHsExpr GhcTc]
-analyze depth inst_map funs = do
-  let expand_fun :: Int -> Located Id -> IO (Maybe AppTree)
-      expand_fun 0 _ = return $ Just (BT bot_var mempty)
+analyze depth inst_map funs =
+  let expand_fun :: Int -> Located Id -> IO AppTree
+      expand_fun 0 _ = return (BT bot_var mempty)
       expand_fun n f0 =
         let (f0_args, _f0_ret) = splitFunTys (varType $ unLoc f0)
-            go :: Int -> [Type] -> IO (Maybe [[AppTree]])
-            go 0 args = return $ Just $ map (const [BT bot_var mempty]) args
-            go n' [] = return $ Just mempty
+            go :: Int -> [Type] -> IO [[AppTree]]
+            go 0 args = return $ map (const [BT bot_var mempty]) args
+            go n' [] = return mempty
             go n' (arg0:argrest) =
-              foldr (\a b ->
-                  (liftA2 ((map (uncurry (<>)) .) . zip) a b) <|> a <|> b -- disjunction
-                ) Nothing -- transpose of sorts, squeeze outer list (of alternatives) into innermost list (of alternatives) per arg: all arg lengths equal by design
-              -- disjunction, but not mconcat because it cats the wrong list dimension
-              . concat <$> mapM (\(fn_var, fn_tys) -> do -- IO [Maybe [[BiTree Id]]]: alts-args-alts
-                argshuffle <- reverse <$> mapM (randomRIO . (0,)) [1..(length fn_tys - 1)]
-                concat <$> mapM (\fn_ty -> do
-                    let (fn_args, fn_ret) = splitFunTys fn_ty
-                    mapM (\(fn_args', fn_ret') -> runMaybeT $ do
-                        (arg0_mapper, fn_mapper) <- liftM $ both map2subst <$> unify arg0 fn_ret'
-                        this_exprs <- MaybeT $ go (n' - 1) (substTys fn_mapper fn_args')
-                        next_exprs <- MaybeT $ go n' (substTys arg0_mapper argrest)
-                        return ([BT fn_var this_exprs] : next_exprs)
-                      ) (zip
-                          (subsequences fn_args)
-                          (reverse $ map
-                              ((`mkFunTys` fn_ret) . reverse)
-                              (subsequences (reverse fn_args))
+              foldr (\(fn_var, fn_tys) acc -> do -- IO [[[BiTree Id]]]: alts-args-alts
+                  argshuffle <- reverse <$> mapM (randomRIO . (0,)) [1..(length fn_tys - 1)]
+                  -- have to use IO: MaybeT handling of Nothing (via conjunction) isn't what we want
+                  -- alternatives over function synthesized type definitions
+                  arg_alts <- concat <$> mapM (\fn_ty -> do
+                      let (fn_args, fn_ret) = splitFunTys fn_ty
+                          arity_alts = (zip
+                              (subsequences fn_args)
+                              (reverse $ map
+                                  ((`mkFunTys` fn_ret) . reverse)
+                                  (subsequences (reverse fn_args))
+                                )
                             )
+                      -- alternatives over function arity
+                      catMaybes <$> ( -- [[[AppTree]]]
+                          sequence $ map (\(fn_args', fn_ret') -> runMaybeT $ do -- :: Maybe [[AppTree]] -- inner: alts; outer: args
+                              (arg0_mapper, fn_mapper) <- liftM $ both map2subst <$> unify arg0 fn_ret'
+                              this_exprs <- lift $ go (n' - 1) (substTys fn_mapper fn_args')
+                              next_exprs <- lift $ go n' (substTys arg0_mapper argrest)
+                              return ([BT fn_var this_exprs] : next_exprs)
+                            ) arity_alts
                         )
-                  ) (take (max 1 $ length fn_tys `div` 8) $ shuffle fn_tys argshuffle)
-              ) funs
-        in fmap (BT f0) <$> go n f0_args
+                    ) (take (max 1 $ length fn_tys `div` 8) $ shuffle fn_tys argshuffle)
+                  -- note that although we are iterating over function arities, the function alt under consideration in _this scope_ has fixed arity (see argrest) so we can zip all the alternatives we collect along the argument axis without loss of data
+                  return $ foldl ((map (uncurry (++)) .) . zip) acc arg_alts
+                ) (cycle [[]]) funs
+        in BT f0 <$> go n f0_args
       flat_funs :: [Located Id]
-      flat_funs = concatMap (uncurry (map . fmap (flip setVarType))) $ funs
+      !flat_funs = concatMap' (uncurry (map . (\(L l v) t -> L l (setVarType v t)))) $ funs
       
-  concat . catMaybes <$> (mapM (fmap (fmap apptree_ast) . expand_fun depth) $ )
+  in concat <$> (mapM (fmap apptree_ast . expand_fun depth) flat_funs)
