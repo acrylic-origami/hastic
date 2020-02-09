@@ -1,4 +1,4 @@
-{-# LANGUAGE LambdaCase, Rank2Types, NamedFieldPuns, TupleSections , MultiWayIf, BangPatternss #-}
+{-# LANGUAGE LambdaCase, Rank2Types, NamedFieldPuns, TupleSections , MultiWayIf, BangPatterns #-}
 module Hastic (
   analyze,
   find_insts,

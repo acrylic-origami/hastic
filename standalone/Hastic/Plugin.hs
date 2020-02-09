@@ -25,19 +25,22 @@ plugin = defaultPlugin {
     , pluginRecompile = impurePlugin
   }
 
-global_binds :: IORef [(ClassInstMap, [(Located Id, [Type])])]
-global_binds = unsafePerformIO $ newIORef []
+global_binds :: IORef (Int, (ClassInstMap, [(Located Id, [Type])]))
+global_binds = unsafePerformIO $ newIORef (0, (mempty, mempty))
 
 install :: [CommandLineOption] -> ModSummary -> TcGblEnv -> TcM TcGblEnv
 install opts _ms tc_gbl = do
   env <- getEnv
   let dflags = extractDynFlags env
-  !binds <- liftIO $ atomicModifyIORef' global_binds ((id &&& id) . ((strictify $ prepare 4 $ tcg_binds tc_gbl) :))
-  liftIO $ putStrLn "REV2"
-  liftIO $ putStrLn $ show $ length $ snd $ head $ binds
+  !(num_modules, !binds) <- liftIO $ atomicModifyIORef' global_binds (\(num_modules', (instmap, fns)) ->
+        let (instmap', fns') = strictify $ prepare 4 $ tcg_binds tc_gbl
+            ret = (num_modules' + 1, (M.unionWith (M.unionWith (++)) instmap instmap', fns <> fns'))
+        in (ret, ret)
+      )
+  liftIO $ putStrLn "REV4"
   
-  when (length binds == (length $ hsc_targets $ env_top env)) $ liftIO $ do
-    putStrLn "ANALYZING!!"
-    (uncurry (analyze 4) $ (M.unionsWith (M.unionWith (++)) *** mconcat) $ unzip binds) >>= putStrLn . ppr_unsafe
+  when (num_modules == (length $ hsc_targets $ env_top env)) $ liftIO $ do
+    putStrLn ("Analyzing: " ++ (show $ length $ snd binds) ++ " functions, " ++ (show $ M.foldr' ((+) . M.foldr' ((+) . length) 0) 0 $ fst binds) ++ " instances")
+    () <$ uncurry (analyze 4) binds
   
   return tc_gbl
