@@ -3,11 +3,14 @@ module Main where
 
 import GHC
 import GHC.Paths ( libdir )
+import DynFlags
 import Unique ( Uniquable(..), Unique(..), getUnique )
 import qualified Unique as U ( getKey )
 import Type
 import TyCon
 import Var
+import FastString ( fsLit )
+import Name ( mkSystemVarName, nameUnique )
 import Bag ( bagToList, unionManyBags )
 import TcEvidence
 import ConLike
@@ -17,36 +20,32 @@ import System.Environment ( getArgs )
 
 import Control.Monad.IO.Class ( liftIO )
 import Control.Monad.Random ( evalRand )
-import System.Random ( getStdGen )
-import Data.Generics ( Data(..), extQ )
-import Data.Generics.Extra ( everything_ppr )
+import System.Random ( getStdGen, StdGen )
+import Data.Generics ( Data(..), extQ, everywhere, mkT )
 import qualified Data.Map.Strict as M
 
 import Hastic
-import Hastic.Util ( strictify, ppr_unsafe, varString )
+import Hastic.Util ( strictify, ppr_unsafe, varString, constr_var_ppr )
 
 module_tcs :: GhcMonad m => ModSummary -> m TypecheckedModule
 module_tcs = (typecheckModule=<<) . parseModule
 
-constr_var_ppr :: Data d => d -> String
-constr_var_ppr = everything_ppr (
-    (show . toConstr)
-    `extQ` (uncurry ((++) . (uncurry ((++) . (++" : ")))) . ((varString &&& uncurry ((++) . (++" :: ")) . (show . varUnique &&& ppr_unsafe . varType)) &&& const "" . constr_var_ppr . varType))
-    `extQ` (ppr_unsafe :: TyCon -> String)
-    `extQ` (ppr_unsafe :: ConLike -> String)
-    `extQ` (ppr_unsafe :: TcEvBinds -> String)
-  )
-          
+pkgs = ["ghc", "ghc-paths", "ghc-prim", "integer-gmp"]
+
 main = do
-  mod_str:depth':args' <- getArgs
+  mod_str:depth':n':args' <- getArgs
   let depth :: Int
       depth = read depth'
+      n :: Int
+      n = read n'
   runGhc (Just libdir) $ do
     dflags <- getSessionDynFlags
     setSessionDynFlags $ dflags {
-        importPaths = "target":(importPaths dflags)
+        importPaths = "target":"purebase.old/base":"purebase.old/hiddens":(importPaths dflags),
+        packageFlags = packageFlags dflags ++ map (\pkg -> ExposePackage pkg (PackageArg pkg) (ModRenaming True []) ) pkgs
       }
     
+    liftIO $ putStrLn "Typechecking..."
     target <- guessTarget mod_str Nothing
     setTargets [target] 
     load LoadAllTargets
@@ -63,12 +62,20 @@ main = do
     -- liftIO $ putStrLn $ unlines $ map (uncurry (shim " : ") . (show . U.getKey . getUnique &&& ppr_unsafe) . fst . head . (\(_,_,x) -> x)) inst_map
     -- liftIO $ putStrLn $ ppr_unsafe $ tyfind (TFState (ev_to_ctx $ snd $ head $ fst $ head funs) (varType $ fst $ snd $ head funs))
     liftIO $ do
+      putStrLn "Preparing..."
       let inst_map = find_insts tl_binds
           !prep = strictify $ prepare depth tl_binds
+          !ph = foldl1 const [0..1000000]
       -- putStrLn $ ppr_unsafe $ map (concretize inst_map) (find_funs tl_binds)
       -- putStrLn $ ppr_unsafe $ varType $ head $ head $ map (uncurry (map . (uncurry setVarType .) . (,))) $ M.toList $ funs
       -- putStrLn $ show $ length $ snd prep
       -- return ()
       putStrLn ("Analyzing: " ++ (show $ length $ snd prep) ++ " functions, " ++ (show $ M.foldr' ((+) . M.foldr' ((+) . length) 0) 0 $ fst prep) ++ " instances")
-      gen <- getStdGen
-      putStrLn $ ppr_unsafe $ head $ concat $ evalRand (sequence $ uncurry (analyze depth) prep) gen
+      -- putStrLn $ unlines $ map (ppr_unsafe . fst) (snd prep)
+      -- gen <- getStdGen
+      -- putStrLn $ "GEN: " ++ show gen
+      let gen :: StdGen
+          gen = read "53971238 1"
+      putStrLn $ ppr_unsafe $ everywhere (mkT (\v -> setVarName v $ mkSystemVarName (nameUnique $ varName v) (fsLit (ppr_unsafe v ++ " :: " ++ ppr_unsafe (varType v))))) $ (!!n) $ (`evalRand` gen) $ (!!1) $ uncurry (analyze depth) prep
+      
+      -- everywhere (mkT (\v -> setVarName v $ mkSystemVarName (nameUnique $ varName v) (fsLit (ppr_unsafe v ++ " :: " ++ ppr_unsafe (varType v)))))

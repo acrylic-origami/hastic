@@ -18,7 +18,7 @@ import Control.Arrow ( (&&&), (***), first, second )
 import Control.Monad
 import System.IO.Unsafe ( unsafePerformIO )
 import Control.Monad.Random ( evalRand )
-import System.Random ( getStdGen )
+import System.Random ( getStdGen, randomRIO )
 import Control.Monad.IO.Class
 
 plugin :: Plugin
@@ -39,11 +39,13 @@ install opts _ms tc_gbl = do
             ret = (num_modules' + 1, (M.unionWith (M.unionWith (++)) instmap instmap', fns <> fns'))
         in (ret, ret)
       )
-  liftIO $ putStrLn "REV5"
+  liftIO $ putStrLn "REV7"
   
   when (num_modules == (length $ hsc_targets $ env_top env)) $ liftIO $ do
     putStrLn ("Analyzing: " ++ (show $ length $ snd binds) ++ " functions, " ++ (show $ M.foldr' ((+) . M.foldr' ((+) . length) 0) 0 $ fst binds) ++ " instances")
     gen <- getStdGen
-    putStrLn $ ppr_unsafe $ (!! 256) $ evalRand (head $ uncurry (analyze 4) binds) gen -- note purity
+    idx <- randomRIO (0, length (snd binds) - 1)
+    putStrLn $ ppr_unsafe $ (snd binds) !! idx
+    putStrLn $ ppr_unsafe $ (`evalRand` gen) $ (!!idx) $ uncurry (analyze 4) binds -- note purity
   
   return tc_gbl

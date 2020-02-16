@@ -2,7 +2,7 @@
 module Hastic.Util where
 
 import Outputable ( Outputable(..), showPpr, interppSP, showSDocUnsafe )
-import Var ( varName )
+import Var ( varName, varType, varUnique )
 import Name ( nameOccName )
 import OccName ( occNameString )
 
@@ -11,7 +11,13 @@ import Control.Applicative
 import Control.Monad.Trans.Maybe ( MaybeT(..) )
 
 import Data.Functor.Identity
-import Data.Generics ( Data(..), GenericT )
+import Data.Generics ( Data(..), GenericT, extQ )
+import Data.Generics.Extra ( everything_ppr )
+
+import Control.Arrow ( (&&&), (***), first, second )
+import TyCon ( TyCon(..) )
+import ConLike ( ConLike(..) )
+import TcEvidence
 
 -- a is candidate function _to_ substitute, b is function being substituted
 -- we want b to be more general than a: the return is a Map of tyvars in b back to things in a
@@ -63,3 +69,12 @@ ppr_unsafe :: Outputable a => a -> String
 ppr_unsafe = showSDocUnsafe . interppSP . pure
 
 varString = occNameString . nameOccName . varName
+
+constr_var_ppr :: Data d => d -> String
+constr_var_ppr = everything_ppr (
+    (show . toConstr)
+    `extQ` (uncurry ((++) . (uncurry ((++) . (++" : ")))) . ((varString &&& uncurry ((++) . (++" :: ")) . (show . varUnique &&& ppr_unsafe . varType)) &&& const "" . constr_var_ppr . varType))
+    `extQ` (ppr_unsafe :: TyCon -> String)
+    `extQ` (ppr_unsafe :: ConLike -> String)
+    `extQ` (ppr_unsafe :: TcEvBinds -> String)
+  )
