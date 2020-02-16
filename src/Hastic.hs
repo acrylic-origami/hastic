@@ -36,6 +36,7 @@ import Control.Arrow ( (&&&), (***), first, second )
 import Control.Monad ( join )
 import Control.Monad.Trans ( MonadTrans(..) )
 import Control.Monad.Trans.Maybe ( MaybeT(..) )
+import Control.Monad.State.Lazy ( StateT(..) )
 import Data.Semigroup ( mtimesDefault )
 import Data.Maybe
 import Data.Generics hiding ( TyCon, empty )
@@ -46,8 +47,9 @@ import Data.Functor ( ($>) )
 
 import Data.IntMap ( IntMap(..) )
 import qualified Data.IntMap as IM
-import Data.Map.Strict ( Map(..) )
-import qualified Data.Map.Strict as M
+import Data.Map.Lazy ( Map(..) )
+import qualified Data.Map.Lazy as M
+import qualified Data.Map.Merge.Lazy as MMerge
 
 import Hastic.Util
 import Hastic.Lang
@@ -69,29 +71,64 @@ ev_to_ctx = catMaybes . map (join . fmap (uncurry (liftA2 (,)) . (tyConClass_may
 -- max_concrete a b = if n_concrete a > n_concrete b then a else b where
 --   n_concrete = everything (+) (0 `mkQ` ())
 
-unify :: Type -> Type -> Maybe (Map Id Type, Map Id Type)
-unify x y = liftA2 (,) (unify' y x) (unify' x y) where -- sorry for flipped args, felt like it made sense to make the first arg the concrete one first
-  unify' a b = -- only bind `b` to more specific aspects of `a`
-    let ((app_con_a, app_args_a), (app_con_b, app_args_b)) = both splitAppTys (a, b) -- NOTE also splits funtys annoyingly
+-- type UnifyST = StateT (Bimap (Maybe Id) (Maybe Id)) Identity 
+unify :: Type -> Type -> Maybe (Map Id Type)
+unify x y | Nothing <- getRuntimeRep_maybe x = Nothing
+unify x y | Nothing <- getRuntimeRep_maybe y = Nothing
+unify x y = unify' 16 y x where -- sorry for flipped args, felt like it made sense to make the first arg the concrete one
+  unify' :: Int -> Type -> Type -> Maybe (Map Id Type)
+  unify' 0 a b = error ("Unification failure: " ++ (ppr_unsafe a) ++ " <> " ++ (ppr_unsafe b))
+  unify' n a b = -- only bind `b` to more specific aspects of `a`
+    let ((app_con_a, app_args_a), (app_con_b, app_args_b)) = both (\ty ->
+            if | Just (arg0, ret0) <- splitFunTy_maybe ty
+               -> [arg0, ret0] <$ splitAppTys ty
+               | otherwise -> splitAppTys ty 
+          ) (a, b) -- NOTE also splits funtys annoyingly
+        ((fa_tyvars_a, fa_ty_a), (fa_tyvars_b, fa_ty_b)) = both splitForAllTys (a, b)
+        merger :: Map Id Type -> Map Id Type -> Maybe (Map Id Type)
+        merger a b =
+          (M.foldrWithKey (liftA2 . M.insert) (Just mempty)) -- Map (Maybe a) -> Maybe (Map a)
+          $ MMerge.merge
+              (MMerge.mapMissing (flip (const . Just)))
+              (MMerge.mapMissing (flip (const . Just)))
+              (MMerge.zipWithMatched (\_ x y -> if x `eqType` y then Just x else Nothing))
+              a b
         masum :: [(Type, Type)] -> Maybe (Map Id Type)
-        masum = foldrM (flip (fmap . M.union) . uncurry unify') mempty
-    in if | null app_args_b
-          , Just bvar <- getTyVar_maybe b -> Just (M.singleton bvar a) -- `b` is totally free (or something else unexpected)
-          | Just (tycon_a, tyargs_a) <- splitTyConApp_maybe a -- `a` is a true TyCon
-          -> case splitTyConApp_maybe b of
-            Just (tycon_b, tyargs_b) -- `b` is also a true TyCon
-              | tycon_a == tycon_b
-              -> masum $ zip tyargs_a tyargs_b
-              | otherwise -> Nothing
-            Nothing
-              | length tyargs_a >= length app_args_b
-              -> let (tyargs_a_l, tyargs_a_r) = splitAt (length tyargs_a - length app_args_b) tyargs_a
-                 in masum ((mkTyConApp tycon_a tyargs_a_l, app_con_b) : zip tyargs_a_r app_args_b)
-              | otherwise -> Nothing -- kindedness fail
-          | not (null app_args_a)
-          -> let ((args_al, args_ar), (args_bl, args_br)) = rmatch app_args_a app_args_b
-             in foldr (liftA2 (<>) . uncurry unify') (Just mempty) (zip (mkAppTys app_con_a args_al : args_ar) (mkAppTys app_con_b args_bl : args_br))
-          | otherwise -> Just mempty
+        masum = foldr ((join.)
+            . liftA2 merger
+            . uncurry (unify' (n - 1))
+          )
+          (Just mempty)
+    in if 
+       -- FORALLS
+       | (not (null fa_tyvars_a) || not (null fa_tyvars_b))
+       -> foldr (\ty m -> liftA2 const m $ isTyVarTy <$> (M.lookup ty =<< m)) (unify' n fa_ty_a fa_ty_b) fa_tyvars_b
+              
+       -- `b` FREE
+       | null app_args_b
+       , Just bvar <- getTyVar_maybe b
+       -> Just (M.singleton bvar a) -- `b` is totally free (or something else unexpected)
+       
+       -- `a` TYCON
+       | Just (tycon_a, _) <- splitTyConApp_maybe app_con_a -- `a` is a true TyCon
+       -> case splitTyConApp_maybe app_con_b of -- trace (ppr_unsafe (tycon_a, app_args_a, b, app_args_b)) $ 
+        Just (tycon_b, _) -- `b` is also a true TyCon
+          | tycon_a == tycon_b
+          -> masum $ zip app_args_a app_args_b
+          | otherwise -> Nothing
+        Nothing
+          | length app_args_a >= length app_args_b
+          -> let (app_args_a_l, app_args_a_r) = splitAt (length app_args_a - length app_args_b) app_args_a
+             in masum ((mkTyConApp tycon_a app_args_a_l, app_con_b) : zip app_args_a_r app_args_b)
+          | otherwise -> Nothing -- kindedness fail (a -> b)
+       
+       -- `a` APPCON
+       | length app_args_b < length app_args_a
+       -> Nothing -- kindedness fail (b -> a)
+       | not (null app_args_a)
+       -> let ((args_al, args_ar), (args_bl, args_br)) = rmatch app_args_a app_args_b
+          in masum (zip (mkAppTys app_con_a args_al : args_ar) (mkAppTys app_con_b args_bl : args_br))
+       | otherwise -> Just mempty
 
 find_insts :: LHsBinds GhcTc -> ClassInstMap
 find_insts = everythingBut (M.unionWith (<>)) (
@@ -107,7 +144,8 @@ find_insts = everythingBut (M.unionWith (<>)) (
                     --       )
                     --   ))
                     (>>= bitraverse tyConClass_maybe ((>>= splitTyConApp_maybe) . one))
-                    . splitTyConApp_maybe
+                    . uncurry (>>)
+                    . (getRuntimeRep_maybe &&& splitTyConApp_maybe)
                     . dropForAlls
                     . varType
                     . abe_mono
@@ -151,7 +189,7 @@ concretize depth inst_map raw_fun = fmap (snd raw_fun,) $ uncurry ((tyfind depth
                     m_sig_subst = flip (TCvSubst emptyInScopeSet) emptyCvSubstEnv
                       . flip unitUFM (mkTyConApp inst_tycon inst_argsl)
                       <$> (getTyVar_maybe cn_tyhead) -- sub protected by arity: still free in fun side
-                    m_inst_subst_map = fmap snd $ foldr (liftA2 (<>) . uncurry unify) (Just mempty) (zip cn_argsr inst_argsr)
+                    m_inst_subst_map = foldr (liftA2 (<>) . uncurry unify) (Just mempty) (zip cn_argsr inst_argsr)
                 in case m_inst_subst_map of
                   Just inst_subst_map ->
                     let inst_subst = map2subst inst_subst_map
@@ -161,6 +199,7 @@ concretize depth inst_map raw_fun = fmap (snd raw_fun,) $ uncurry ((tyfind depth
                       ctx = subbed_ctx_rest' <> subbed_inst_ctx,
                       sig = fromMaybe sig $ flip substTy sig <$> m_sig_subst
                     }
+                  Nothing -> Nothing
               else Nothing
     in case getTyVar_maybe cn_tyhead of
         
